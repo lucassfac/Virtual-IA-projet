@@ -1,0 +1,78 @@
+# --- PYTHON BASICS ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- VIRTUAL ENVIRONMENTS (Très important) ---
+# Ignore ton dossier d'installation Python
+venv/
+env/
+ENV/
+.env
+
+# --- AI & LARGE MODELS (CRITIQUE POUR TOI) ---
+# On ne veut JAMAIS envoyer ces fichiers lourds sur GitHub
+*.gguf
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.h5
+*.tflite
+
+# Ignore tout le contenu du dossier models/ sauf un fichier texte explicatif
+models/*
+!models/README.md
+!models/.gitkeep
+
+# Ignore les bases de données vectorielles locales (RAG)
+chroma_db/
+vector_store/
+
+# --- IDE & EDITEURS ---
+# Fichiers de configuration de ton éditeur (VS Code, PyCharm...)
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- TESTS & QUALITE ---
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# --- FICHIERS TEMPORAIRES PROJET ---
+# Si ton appli génère des images ou audio temporaires
+temp/
+output/
+*.log
+*.wav
+*.mp3
+*.jpg
+*.png
+
+# --- OS ---
+.DS_Store
+Thumbs.db
