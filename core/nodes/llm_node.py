@@ -5,24 +5,30 @@ from core.types import DataPacket, DataType
 class LLMNode(BaseNode):
     def __init__(self, name: str = "LLM Generator"):
         super().__init__(name)
-        self.llm_engine = None  # C'est ici qu'on stockera l'objet Llama
+        self.llm_engine = None
 
-    def load_model(self, model_path: str):
+    # MODIFICATION : On ajoute un argument optionnel lora_path
+    def load_model(self, model_path: str, lora_path: str = None):
         """
-        Surcharge de la méthode parent.
-        Ici, on charge VRAIMENT le modèle en RAM avec llama-cpp.
+        Charge le modèle, et optionnellement un adaptateur LoRA (Spécialisation).
         """
         print(f"[{self.name}] Chargement du modèle {model_path}...")
+        
+        if lora_path:
+            print(f"[{self.name}] 🧬 APPLICATION DE LA SPÉCIALISATION (LoRA) : {lora_path}")
+        
         try:
-            # n_ctx=2048 : La mémoire de conversation
-            # n_threads=4 : Utilise 4 cœurs du CPU pour aller vite
-            self.llm_engine = Llama(model_path=model_path, n_ctx=2048, verbose=False)
-            
-            # Important : On dit au parent (BaseNode) que c'est bon
+            # MODIFICATION ICI : On passe lora_path au moteur
+            self.llm_engine = Llama(
+                model_path=model_path,
+                lora_path=lora_path,  # C'est ici que la magie opère
+                n_ctx=2048, 
+                verbose=False
+            )
             super().load_model(model_path)
             
         except Exception as e:
-            print(f"ERREUR FATALE: Impossible de charger le modèle. {e}")
+            print(f"ERREUR FATALE: {e}")
             raise e
 
     def _run_inference(self):

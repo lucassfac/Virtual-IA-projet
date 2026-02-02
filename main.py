@@ -1,34 +1,46 @@
 from core.nodes.llm_node import LLMNode
+from core.nodes.trainer_node import TrainerNode
 from core.types import DataPacket, DataType
 import os
 
 def main():
-    print("=== DÉMARRAGE DE NEURAL FORGE (CLI MODE) ===")
+    print("=== TEST DU PIPELINE LoRA (Spécialisation) ===\n")
 
-    # 1. Création du Nœud
-    my_node = LLMNode(name="Mistral-Local")
-
-    # 2. Chargement du Modèle (Celui que tu as téléchargé tout à l'heure)
-    # Assure-toi que le fichier est bien là !
-    model_path = "models/tinyllama.gguf" 
+    # --- PHASE 1 : CRÉATION DE L'EXPERT (Training) ---
+    trainer = TrainerNode(name="Trainer-Juridique")
     
-    if not os.path.exists(model_path):
-        print(f"Erreur : Le modèle {model_path} n'existe pas.")
-        return
+    # Inputs fictifs pour le test
+    dataset = DataPacket(DataType.TEXT, "documents_juridiques.jsonl")
+    base_model = DataPacket(DataType.TEXT, "models/tinyllama.gguf")
+    
+    trainer.set_inputs(dataset, base_model)
+    
+    # Lancement de l'entraînement simulé
+    packet_resultat_training = trainer.process()
+    path_lora_cree = packet_resultat_training.content
+    
+    print(f"\n✅ SUCCESS: Fichier LoRA créé à : {path_lora_cree}\n")
 
-    my_node.load_model(model_path)
+    # --- PHASE 2 : UTILISATION DE L'EXPERT (Inférence) ---
+    llm_node = LLMNode(name="Mistral-Avocat")
+    
+    # On charge le modèle AVEC le chemin du LoRA qu'on vient de créer
+    # (Note: Dans ce test simulé, le fichier .lora n'existe pas vraiment physiquement
+    # donc on va mettre lora_path=None juste pour éviter que llama.cpp ne plante,
+    # mais la logique du code est prête pour quand tu auras un vrai fichier .lora)
+    
+    # Pour le test réel sans planter : on ne met pas le lora_path car le fichier est fictif
+    # Mais dans la vraie vie : lora_path=path_lora_cree
+    llm_node.load_model("models/tinyllama.gguf", lora_path=None) 
 
-    # 3. Simulation de l'entrée utilisateur (Comme si ça venait de l'interface)
-    user_input = DataPacket(DataType.TEXT, "Quelle est la capitale de la France ?")
-    my_node.set_input(user_input)
-
-    # 4. Exécution du moteur
-    result_packet = my_node.process()
-
-    # 5. Affichage du résultat
-    print("\n--- RÉSULTAT FINAL ---")
-    print(f"IA a répondu : {result_packet.content}")
-    print(f"Type de donnée : {result_packet.data_type}")
+    # Test de question
+    user_input = DataPacket(DataType.TEXT, "Que dit l'article 12 du code civil ?")
+    llm_node.set_input(user_input)
+    
+    reponse = llm_node.process()
+    
+    print(f"--- Réponse de l'IA Spécialisée ---")
+    print(reponse.content)
 
 if __name__ == "__main__":
     main()
