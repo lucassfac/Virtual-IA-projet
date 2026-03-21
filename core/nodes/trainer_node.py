@@ -121,14 +121,25 @@ class TrainerNode(BaseNode):
         forge_logger.info(f"[{self.name}] Modèle de base : {self.base_model_path}")
         forge_logger.info(f"[{self.name}] Dataset        : {self.dataset_path}")
 
-        os.makedirs(self.output_dir, exist_ok=True)
+        # Résolution du chemin absolu depuis la racine du projet
+        # Évite les erreurs de CWD quand lancé depuis un autre répertoire
+        project_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        if os.path.isabs(self.output_dir):
+            abs_output_dir = self.output_dir
+        else:
+            abs_output_dir = os.path.join(project_root, self.output_dir.rstrip("/"))
+
+        os.makedirs(abs_output_dir, exist_ok=True)
+        forge_logger.info(f"[{self.name}] Dossier de sortie : {abs_output_dir}")
 
         # Nom de l'adaptateur dérivé du dataset
         dataset_stem = os.path.splitext(
             os.path.basename(self.dataset_path)
         )[0]
         self.output_adapter_path = os.path.join(
-            self.output_dir, f"{dataset_stem}_adapter.lora"
+            abs_output_dir, f"{dataset_stem}_adapter.lora"
         )
 
         total_steps = 5
@@ -143,8 +154,21 @@ class TrainerNode(BaseNode):
             if self._progress_callback:
                 self._progress_callback(i + 1, total_steps, loss)
 
+        # Création physique du fichier .lora sur le disque
+        # (simulé : en production, llama.cpp écrirait le vrai fichier)
+        with open(self.output_adapter_path, "w", encoding="utf-8") as f:
+            import json
+            json.dump({
+                "neural_forge_version": "0.1.0",
+                "base_model": self.base_model_path,
+                "dataset": self.dataset_path,
+                "steps": total_steps,
+                "final_loss": simulated_losses[-1],
+                "type": "lora_adapter_simulated",
+            }, f, indent=2, ensure_ascii=False)
+
         forge_logger.info(
-            f"[{self.name}] ✅ Adaptateur sauvegardé : {self.output_adapter_path}"
+            f"[{self.name}] ✅ Fichier créé : {self.output_adapter_path}"
         )
 
         return DataPacket(

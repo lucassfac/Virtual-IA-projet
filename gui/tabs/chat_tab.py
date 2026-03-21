@@ -1,87 +1,69 @@
 """
-chat_tab.py — Onglet Chatbot avec bulles iMessage et streaming token par token.
+chat_tab.py — Onglet Chat multimodal (texte + image optionnelle).
+
+Fusionne Chat et Vision : l'utilisateur peut joindre une image à n'importe
+quel message. Si une image est jointe ET un modèle LLaVA est chargé, on
+utilise VisionNode ; sinon on utilise LLMNode en texte seul.
 """
 
 import html
+import os
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QTextBrowser, QSizePolicy, QFrame,
+    QPushButton, QLineEdit, QTextBrowser, QFileDialog,
+    QSizePolicy, QScrollArea,
 )
-from PyQt6.QtCore import Qt, pyqtSlot
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtCore import Qt, pyqtSlot, QSize
+from PyQt6.QtGui import QPixmap, QKeyEvent
 
 from core.types import DataPacket, DataType
-from gui.workers import StreamWorker
+from gui.workers import StreamWorker, VisionWorker
 
 
-# ── Templates HTML pour les bulles de chat ──────────────────────────────
-_USER_BUBBLE = """
-<div style="margin: 6px 0 6px 60px; text-align: right;">
-  <div style="
-    display: inline-block;
-    background: #0A84FF;
-    color: #FFFFFF;
-    padding: 10px 14px;
-    border-radius: 18px 18px 4px 18px;
-    font-size: 14px;
-    line-height: 1.5;
-    max-width: 100%;
-    word-wrap: break-word;
-    text-align: left;
-  ">{text}</div>
-</div>
-"""
+# ── Templates HTML ────────────────────────────────────────────────────
 
-_AI_BUBBLE_OPEN = """
-<div style="margin: 6px 60px 6px 0; text-align: left;">
-  <div style="
-    display: inline-block;
-    background: #2C2C2E;
-    color: #FFFFFF;
-    padding: 10px 14px;
-    border-radius: 18px 18px 18px 4px;
-    font-size: 14px;
-    line-height: 1.5;
-    max-width: 100%;
-    word-wrap: break-word;
-  " id="streaming">{text}"""
+_USER_TEXT = """
+<div style="margin:8px 0 8px 80px;text-align:right;">
+  <div style="display:inline-block;background:#0A84FF;color:#fff;
+    padding:10px 14px;border-radius:18px 18px 4px 18px;
+    font-size:13px;line-height:1.6;text-align:left;
+    max-width:100%;word-wrap:break-word;">{text}</div>
+</div>"""
 
-_AI_BUBBLE_CLOSE = "</div></div>"
+_USER_IMG = """
+<div style="margin:8px 0 4px 80px;text-align:right;">
+  <img src="{src}" style="max-width:220px;max-height:160px;
+    border-radius:12px;display:inline-block;"/>
+</div>"""
 
-_SYSTEM_MSG = """
-<div style="margin: 12px 0; text-align: center;">
-  <span style="
-    color: #636366;
-    font-size: 11px;
-    background: #1C1C1E;
-    padding: 3px 10px;
-    border-radius: 10px;
-  ">{text}</span>
-</div>
-"""
+_AI_OPEN = """
+<div style="margin:8px 80px 8px 0;text-align:left;">
+  <div style="display:inline-block;background:#2C2C2E;color:#F2F2F7;
+    padding:10px 14px;border-radius:18px 18px 18px 4px;
+    font-size:13px;line-height:1.6;max-width:100%;word-wrap:break-word;">"""
+
+_AI_CLOSE = "</div></div>"
 
 _THINKING = """
-<div style="margin: 6px 60px 6px 0;">
-  <div style="
-    display: inline-block;
-    background: #2C2C2E;
-    padding: 12px 16px;
-    border-radius: 18px 18px 18px 4px;
-  ">
-    <span style="color: #636366; font-size: 18px; letter-spacing: 4px;">···</span>
+<div style="margin:8px 80px 8px 0;">
+  <div style="display:inline-block;background:#2C2C2E;
+    padding:12px 18px;border-radius:18px 18px 18px 4px;">
+    <span style="color:#636366;font-size:20px;letter-spacing:5px;">···</span>
   </div>
-</div>
-"""
+</div>"""
+
+_SYS = """
+<div style="margin:10px 0;text-align:center;">
+  <span style="color:#48484A;font-size:11px;background:#1C1C1E;
+    padding:3px 12px;border-radius:10px;">{text}</span>
+</div>"""
 
 
 class ChatInput(QLineEdit):
-    """QLineEdit qui envoie sur Entrée et ignore Shift+Entrée."""
-
     def keyPressEvent(self, event: QKeyEvent):
-        if (
-            event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
-            and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier
-        ):
+        if (event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
             self.returnPressed.emit()
         else:
             super().keyPressEvent(event)
@@ -89,19 +71,18 @@ class ChatInput(QLineEdit):
 
 class ChatTab(QWidget):
 
-    def __init__(self, llm_node, parent=None):
+    def __init__(self, llm_node, vision_node, parent=None):
         super().__init__(parent)
         self.llm_node = llm_node
+        self.vision_node = vision_node
         self._worker = None
-        self._streaming_html = ""   # Accumule le HTML de la réponse en cours
-        self._chat_html = ""        # Historique complet des messages
+        self._stream_buf = ""
+        self._history = ""
+        self._attached_image: str = ""
         self._build_ui()
-        self._add_system("Chargez un modèle dans Paramètres pour commencer.")
+        self._sys("Chargez un modèle dans Paramètres pour commencer.")
 
     # ------------------------------------------------------------------
-    # Construction UI
-    # ------------------------------------------------------------------
-
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -109,192 +90,268 @@ class ChatTab(QWidget):
 
         # ── Header ──
         header = QWidget()
-        header.setObjectName("card")
         header.setStyleSheet(
-            "border-radius: 0px; border-left: none; border-right: none;"
-            " border-top: none; border-bottom: 1px solid #2C2C2E;"
-            " background-color: #0A0A0A;"
+            "background-color:#111113;"
+            "border-bottom:1px solid rgba(255,255,255,0.07);"
         )
-        header.setFixedHeight(56)
-        h_layout = QHBoxLayout(header)
-        h_layout.setContentsMargins(20, 0, 20, 0)
+        header.setFixedHeight(52)
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(18, 0, 18, 0)
+        hl.setSpacing(10)
 
-        self.model_label = QLabel("Aucun modèle chargé")
-        self.model_label.setObjectName("statusLabel")
-        h_layout.addWidget(self.model_label)
-        h_layout.addStretch()
+        self._model_lbl = QLabel("Aucun modèle chargé")
+        self._model_lbl.setStyleSheet("color:#636366;font-size:12px;background:transparent;")
+        hl.addWidget(self._model_lbl)
+        hl.addStretch()
 
-        self.status_dot = QLabel()
-        self.status_dot.setFixedSize(8, 8)
+        # Dot statut
+        self._dot = QLabel()
+        self._dot.setFixedSize(8, 8)
         self._set_dot("#3A3A3C")
-        h_layout.addWidget(self.status_dot)
+        hl.addWidget(self._dot)
 
+        hl.addSpacing(10)
         clear_btn = QPushButton("Effacer")
         clear_btn.setObjectName("secondaryBtn")
-        clear_btn.setFixedHeight(30)
-        clear_btn.clicked.connect(self._clear_chat)
-        h_layout.addSpacing(12)
-        h_layout.addWidget(clear_btn)
-
+        clear_btn.setFixedHeight(28)
+        clear_btn.setFixedWidth(70)
+        clear_btn.clicked.connect(self._clear)
+        hl.addWidget(clear_btn)
         root.addWidget(header)
 
-        # ── Zone de chat ──
-        self.chat_view = QTextBrowser()
-        self.chat_view.setOpenExternalLinks(False)
-        self.chat_view.setStyleSheet(
-            "background-color: #000000; padding: 16px 20px;"
+        # ── Zone chat ──
+        self._chat = QTextBrowser()
+        self._chat.setOpenExternalLinks(False)
+        self._chat.setStyleSheet(
+            "background-color:#111113;border:none;padding:8px 16px;"
         )
-        root.addWidget(self.chat_view, stretch=1)
+        root.addWidget(self._chat, stretch=1)
 
-        # ── Zone de saisie ──
+        # ── Preview image attachée ──
+        self._preview_bar = QWidget()
+        self._preview_bar.setFixedHeight(64)
+        self._preview_bar.setStyleSheet(
+            "background-color:#1A1A1C;"
+            "border-top:1px solid rgba(255,255,255,0.06);"
+        )
+        self._preview_bar.hide()
+        pb_layout = QHBoxLayout(self._preview_bar)
+        pb_layout.setContentsMargins(14, 8, 14, 8)
+        pb_layout.setSpacing(10)
+
+        self._preview_img = QLabel()
+        self._preview_img.setFixedSize(48, 48)
+        self._preview_img.setStyleSheet("border-radius:8px;")
+        pb_layout.addWidget(self._preview_img)
+
+        self._preview_name = QLabel()
+        self._preview_name.setStyleSheet("color:#8E8E93;font-size:12px;background:transparent;")
+        pb_layout.addWidget(self._preview_name)
+        pb_layout.addStretch()
+
+        rm_btn = QPushButton("✕")
+        rm_btn.setFixedSize(24, 24)
+        rm_btn.setStyleSheet(
+            "background:rgba(255,255,255,0.08);color:#8E8E93;"
+            "border:none;border-radius:12px;font-size:11px;"
+        )
+        rm_btn.clicked.connect(self._remove_image)
+        pb_layout.addWidget(rm_btn)
+        root.addWidget(self._preview_bar)
+
+        # ── Barre de saisie ──
         input_bar = QWidget()
         input_bar.setStyleSheet(
-            "background-color: #0A0A0A;"
-            " border-top: 1px solid #2C2C2E;"
+            "background-color:#111113;"
+            "border-top:1px solid rgba(255,255,255,0.07);"
         )
-        input_bar.setFixedHeight(70)
-        i_layout = QHBoxLayout(input_bar)
-        i_layout.setContentsMargins(16, 14, 16, 14)
-        i_layout.setSpacing(10)
+        input_bar.setFixedHeight(66)
+        il = QHBoxLayout(input_bar)
+        il.setContentsMargins(14, 12, 14, 12)
+        il.setSpacing(8)
 
-        self.input_field = ChatInput()
-        self.input_field.setPlaceholderText("Écrivez un message…")
-        self.input_field.setFixedHeight(42)
-        self.input_field.returnPressed.connect(self._send_message)
-        i_layout.addWidget(self.input_field)
+        # Bouton attacher image
+        self._attach_btn = QPushButton("+")
+        self._attach_btn.setFixedSize(42, 42)
+        self._attach_btn.setStyleSheet(
+            "background:rgba(255,255,255,0.08);color:#8E8E93;"
+            "border:none;border-radius:10px;font-size:20px;font-weight:300;"
+        )
+        self._attach_btn.setToolTip("Joindre une image")
+        self._attach_btn.clicked.connect(self._attach_image)
+        il.addWidget(self._attach_btn)
 
-        self.send_btn = QPushButton("↑")
-        self.send_btn.setObjectName("iconBtn")
-        self.send_btn.setFixedSize(42, 42)
-        self.send_btn.setToolTip("Envoyer (Entrée)")
-        self.send_btn.clicked.connect(self._send_message)
-        i_layout.addWidget(self.send_btn)
+        self._input = ChatInput()
+        self._input.setPlaceholderText("Écrivez un message…")
+        self._input.setFixedHeight(42)
+        self._input.returnPressed.connect(self._send)
+        il.addWidget(self._input)
+
+        self._send_btn = QPushButton("↑")
+        self._send_btn.setObjectName("iconBtn")
+        self._send_btn.setFixedSize(42, 42)
+        self._send_btn.setToolTip("Envoyer")
+        self._send_btn.clicked.connect(self._send)
+        il.addWidget(self._send_btn)
 
         root.addWidget(input_bar)
 
     # ------------------------------------------------------------------
-    # Slots publics (appelés par MainWindow)
-    # ------------------------------------------------------------------
-
+    # API publique
     def on_model_loaded(self, model_path: str, lora_path: str):
-        import os
         name = os.path.basename(model_path)
         lora = f" + {os.path.basename(lora_path)}" if lora_path else ""
-        self.model_label.setText(f"{name}{lora}")
+        self._model_lbl.setText(f"{name}{lora}")
         self._set_dot("#30D158")
-        self._add_system(f"Modèle prêt : {name}{lora}")
+        self._sys(f"Modèle prêt : {name}{lora}")
 
     # ------------------------------------------------------------------
-    # Envoi de message
-    # ------------------------------------------------------------------
+    # Gestion image
+    def _attach_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Joindre une image", "",
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp)"
+        )
+        if path:
+            self._attached_image = path
+            px = QPixmap(path).scaled(
+                QSize(48, 48), Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self._preview_img.setPixmap(px)
+            self._preview_name.setText(os.path.basename(path))
+            self._preview_bar.show()
+            self._attach_btn.setStyleSheet(
+                "background:#0A84FF;color:#fff;"
+                "border:none;border-radius:10px;font-size:20px;font-weight:300;"
+            )
 
-    def _send_message(self):
-        text = self.input_field.text().strip()
-        if not text:
+    def _remove_image(self):
+        self._attached_image = ""
+        self._preview_bar.hide()
+        self._preview_img.clear()
+        self._attach_btn.setStyleSheet(
+            "background:rgba(255,255,255,0.08);color:#8E8E93;"
+            "border:none;border-radius:10px;font-size:20px;font-weight:300;"
+        )
+
+    # ------------------------------------------------------------------
+    # Envoi
+    def _send(self):
+        text = self._input.text().strip()
+        if not text and not self._attached_image:
             return
         if not self.llm_node.model_loaded:
-            self._add_system("Aucun modèle chargé — rendez-vous dans Paramètres.")
+            self._sys("Aucun modèle chargé — rendez-vous dans Paramètres.")
             return
         if self._worker and self._worker.isRunning():
             return
 
-        self.input_field.clear()
-        self.send_btn.setEnabled(False)
-        self.input_field.setEnabled(False)
+        self._input.clear()
+        self._send_btn.setEnabled(False)
+        self._input.setEnabled(False)
 
-        # Bulle utilisateur
-        self._append_html(_USER_BUBBLE.format(text=html.escape(text)))
+        # Affiche image en bulle utilisateur
+        if self._attached_image:
+            self._append(_USER_IMG.format(src=self._attached_image))
 
-        # Indicateur "en train d'écrire"
-        self._append_html(_THINKING)
+        # Affiche texte en bulle utilisateur
+        if text:
+            self._append(_USER_TEXT.format(text=html.escape(text)))
 
-        packet = DataPacket(DataType.TEXT, text, source="user")
-        self._worker = StreamWorker(self.llm_node, packet)
-        self._worker.token.connect(self._on_token)
-        self._worker.error.connect(self._on_error)
-        self._worker.finished.connect(self._on_finished)
-        self._streaming_html = ""
+        self._append(_THINKING)
+
+        # Choix du worker
+        if self._attached_image and self.vision_node.model_loaded:
+            # Vision multimodal
+            if text:
+                self.vision_node.set_prompt(text)
+            packet = DataPacket(DataType.IMAGE_PATH, self._attached_image, source="user")
+            self._worker = VisionWorker(self.vision_node, packet)
+            self._worker.result.connect(self._on_result)
+            self._worker.error.connect(self._on_error)
+            self._worker.finished.connect(self._on_done)
+        else:
+            # Texte seul via streaming
+            prompt = text or "Décris cette image."
+            packet = DataPacket(DataType.TEXT, prompt, source="user")
+            self._stream_buf = ""
+            self._worker = StreamWorker(self.llm_node, packet)
+            self._worker.token.connect(self._on_token)
+            self._worker.error.connect(self._on_error)
+            self._worker.finished.connect(self._on_stream_done)
+
+        self._remove_image()
         self._worker.start()
 
     # ------------------------------------------------------------------
-    # Slots workers
-    # ------------------------------------------------------------------
-
+    # Slots streaming
     @pyqtSlot(str)
     def _on_token(self, token: str):
-        """Reçoit un token, reconstruit la bulle IA en temps réel."""
-        self._streaming_html += html.escape(token)
-
-        # Remplace le contenu complet (historique + bulle en cours)
-        full = (
-            self._chat_html
-            + _AI_BUBBLE_OPEN.format(text=self._streaming_html)
-            + _AI_BUBBLE_CLOSE
-        )
-        self.chat_view.setHtml(self._wrap_html(full))
-        # Scroll vers le bas
-        sb = self.chat_view.verticalScrollBar()
-        sb.setValue(sb.maximum())
-
-    @pyqtSlot(str)
-    def _on_error(self, message: str):
-        self._remove_thinking()
-        self._append_html(
-            _SYSTEM_MSG.format(text=f"Erreur : {html.escape(message)}")
-        )
+        self._stream_buf += html.escape(token)
+        full = self._history + _AI_OPEN + self._stream_buf + _AI_CLOSE
+        self._chat.setHtml(self._wrap(full))
+        self._scroll_bottom()
 
     @pyqtSlot()
-    def _on_finished(self):
-        if self._streaming_html:
-            # Finalise la bulle dans l'historique
-            self._chat_html += (
-                _AI_BUBBLE_OPEN.format(text=self._streaming_html)
-                + _AI_BUBBLE_CLOSE
-            )
-        self._streaming_html = ""
-        self.send_btn.setEnabled(True)
-        self.input_field.setEnabled(True)
-        self.input_field.setFocus()
+    def _on_stream_done(self):
+        if self._stream_buf:
+            self._history += _AI_OPEN + self._stream_buf + _AI_CLOSE
+        self._stream_buf = ""
+        self._unlock()
+
+    # Slots vision (résultat complet)
+    @pyqtSlot(str)
+    def _on_result(self, text: str):
+        self._history = self._history.replace(_THINKING, "")
+        self._history += _AI_OPEN + html.escape(text) + _AI_CLOSE
+        self._chat.setHtml(self._wrap(self._history))
+        self._scroll_bottom()
+
+    @pyqtSlot(str)
+    def _on_error(self, msg: str):
+        self._history = self._history.replace(_THINKING, "")
+        self._sys(f"Erreur : {html.escape(msg)}")
+
+    @pyqtSlot()
+    def _on_done(self):
+        self._unlock()
 
     # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+    def _append(self, block: str):
+        self._history += block
+        self._chat.setHtml(self._wrap(self._history))
+        self._scroll_bottom()
 
-    def _append_html(self, block: str):
-        self._chat_html += block
-        self.chat_view.setHtml(self._wrap_html(self._chat_html))
-        sb = self.chat_view.verticalScrollBar()
+    def _sys(self, text: str):
+        self._append(_SYS.format(text=text))
+
+    def _clear(self):
+        self._history = ""
+        self._chat.setHtml("")
+        self._sys("Conversation effacée.")
+
+    def _unlock(self):
+        self._send_btn.setEnabled(True)
+        self._input.setEnabled(True)
+        self._input.setFocus()
+
+    def _scroll_bottom(self):
+        sb = self._chat.verticalScrollBar()
         sb.setValue(sb.maximum())
 
-    def _remove_thinking(self):
-        """Supprime l'indicateur de chargement de l'historique."""
-        self._chat_html = self._chat_html.replace(_THINKING, "")
-
-    def _add_system(self, text: str):
-        self._append_html(_SYSTEM_MSG.format(text=text))
-
-    def _clear_chat(self):
-        self._chat_html = ""
-        self.chat_view.setHtml("")
-        self._add_system("Conversation effacée.")
-
-    def _set_dot(self, color: str):
-        self.status_dot.setStyleSheet(
-            f"background-color: {color}; border-radius: 4px;"
-            " min-width: 8px; max-width: 8px;"
-            " min-height: 8px; max-height: 8px;"
+    def _set_dot(self, c: str):
+        self._dot.setStyleSheet(
+            f"background-color:{c};border-radius:4px;"
+            "min-width:8px;max-width:8px;min-height:8px;max-height:8px;"
         )
 
     @staticmethod
-    def _wrap_html(body: str) -> str:
-        return f"""
-        <html><head><style>
-        body {{
-            background-color: #000000;
-            color: #FFFFFF;
-            font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
-            font-size: 14px;
-            margin: 0; padding: 8px;
-        }}
-        </style></head><body>{body}</body></html>
-        """
+    def _wrap(body: str) -> str:
+        return (
+            "<html><head><style>"
+            "body{background:#111113;color:#F2F2F7;"
+            "font-family:-apple-system,'Helvetica Neue',Arial,sans-serif;"
+            "font-size:13px;margin:0;padding:4px 8px;}"
+            "</style></head><body>" + body + "</body></html>"
+        )

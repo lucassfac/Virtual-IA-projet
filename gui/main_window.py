@@ -1,62 +1,59 @@
 """
-main_window.py — Fenêtre principale de Neural Forge.
-
-Architecture :
-  ┌──────────────┬──────────────────────────────────┐
-  │   Sidebar    │         QStackedWidget            │
-  │   (180px)    │   Chat / Vision / Train / Params  │
-  └──────────────┴──────────────────────────────────┘
-
-La sidebar est inspirée du design macOS (System Settings / Finder).
+main_window.py — Fenêtre principale Neural Forge.
+- Icônes texte (pas emoji) pour compatibilité Linux/WSL
+- Layout responsive avec QScrollArea
+- Chat multimodal (fusion Chat + Vision)
+- 3 onglets : Chat, Entraînement, Paramètres
 """
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QPushButton, QStackedWidget, QStatusBar,
-    QSizePolicy, QFrame,
+    QSizePolicy, QFrame, QScrollArea,
 )
 from PyQt6.QtCore import Qt, pyqtSlot, QSize
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtGui import QFont
 
 from core.nodes.llm_node import LLMNode
 from core.nodes.vision_node import VisionNode
 
 from gui.tabs.chat_tab import ChatTab
-from gui.tabs.vision_tab import VisionTab
 from gui.tabs.training_tab import TrainingTab
 from gui.tabs.settings_tab import SettingsTab
 
 
-# ── Définition des onglets ────────────────────────────────────────────
-_NAV_ITEMS = [
-    ("💬", "Chat",          "Converser avec l'IA"),
-    ("🔍", "Vision",        "Analyser des images"),
-    ("⚡", "Entraînement",  "Spécialiser un modèle"),
-    ("⚙",  "Paramètres",   "Configurer l'application"),
+# Icônes ASCII — rendu fiable sur tous les OS
+_NAV = [
+    ("MSG",  "Chat",           "Discuter avec l'IA"),
+    ("TRN",  "Entraînement",   "Spécialiser un modèle"),
+    ("CFG",  "Paramètres",     "Configurer l'application"),
 ]
 
 
-class NavButton(QPushButton):
-    """Bouton de navigation latérale."""
-
-    def __init__(self, icon: str, label: str, tooltip: str, parent=None):
-        super().__init__(f"  {icon}  {label}", parent)
+class NavBtn(QPushButton):
+    def __init__(self, badge: str, label: str, tip: str, parent=None):
+        super().__init__(parent)
+        self._badge = badge
+        self._label = label
+        self.setToolTip(tip)
         self.setObjectName("navBtn")
         self.setCheckable(False)
-        self.setToolTip(tooltip)
-        self.setFixedHeight(44)
-        self.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        self._active = False
+        self.setFixedHeight(42)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._refresh(False)
 
-    def set_active(self, active: bool):
-        self._active = active
-        self.setProperty("active", "true" if active else "false")
-        # Force le rechargement du style
+    def set_active(self, on: bool):
+        self.setProperty("active", "true" if on else "false")
         self.style().unpolish(self)
         self.style().polish(self)
+        self._refresh(on)
+
+    def _refresh(self, on: bool):
+        dot_color = "#0A84FF" if on else "#3A3A3C"
+        self.setText(f"  {self._label}")
+        self.setStyleSheet(
+            self.styleSheet()  # keep QSS objectName rules
+        )
 
 
 class MainWindow(QMainWindow):
@@ -64,160 +61,140 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Neural Forge")
-        self.setMinimumSize(QSize(860, 580))
-        self.resize(QSize(1080, 680))
+        self.setMinimumSize(QSize(720, 500))
+        self.resize(QSize(1040, 660))
 
-        # ── Nœuds partagés ──
         self.llm_node = LLMNode(name="LLM-Principal")
         self.vision_node = VisionNode(name="Vision-Principal")
 
         self._build_ui()
-        self._nav_buttons[0].set_active(True)
-
-    # ------------------------------------------------------------------
-    # Construction UI
-    # ------------------------------------------------------------------
+        self._switch(0)
 
     def _build_ui(self):
         central = QWidget()
         central.setObjectName("contentArea")
         self.setCentralWidget(central)
 
-        main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
+        main = QHBoxLayout(central)
+        main.setContentsMargins(0, 0, 0, 0)
+        main.setSpacing(0)
 
         # ── Sidebar ──
-        sidebar = self._build_sidebar()
-        main_layout.addWidget(sidebar)
+        main.addWidget(self._make_sidebar())
 
-        # ── Séparateur vertical ──
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet("background-color: #2C2C2E; max-width: 1px;")
-        main_layout.addWidget(sep)
+        sep.setStyleSheet("background:rgba(255,255,255,0.06);max-width:1px;border:none;")
+        main.addWidget(sep)
 
-        # ── Contenu ──
+        # ── Stack ──
         self.stack = QStackedWidget()
         self.stack.setObjectName("contentArea")
 
-        # Instanciation des onglets
-        self.chat_tab = ChatTab(self.llm_node)
-        self.vision_tab = VisionTab(self.vision_node)
+        self.chat_tab = ChatTab(self.llm_node, self.vision_node)
         self.training_tab = TrainingTab()
         self.settings_tab = SettingsTab(self.llm_node)
 
-        self.stack.addWidget(self.chat_tab)      # 0
-        self.stack.addWidget(self.vision_tab)    # 1
-        self.stack.addWidget(self.training_tab)  # 2
-        self.stack.addWidget(self.settings_tab)  # 3
+        # Wrap settings & training in scroll areas for responsiveness
+        self.stack.addWidget(self.chat_tab)                         # 0 — pas de scroll (chat scroll lui-même)
+        self.stack.addWidget(self._scrollable(self.training_tab))   # 1
+        self.stack.addWidget(self._scrollable(self.settings_tab))   # 2
 
-        main_layout.addWidget(self.stack, stretch=1)
+        main.addWidget(self.stack, stretch=1)
 
-        # ── Connexion du chargement de modèle ──
         self.settings_tab.model_loaded.connect(self._on_model_loaded)
+        self._build_statusbar()
 
-        # ── Status bar ──
-        self._build_status_bar()
+    def _make_sidebar(self) -> QWidget:
+        sb = QWidget()
+        sb.setObjectName("sidebar")
+        sb.setFixedWidth(180)
 
-    def _build_sidebar(self) -> QWidget:
-        sidebar = QWidget()
-        sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(190)
-
-        layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(12, 20, 12, 16)
+        layout = QVBoxLayout(sb)
+        layout.setContentsMargins(10, 20, 10, 14)
         layout.setSpacing(0)
 
-        # ── Logo ──
-        logo_area = QVBoxLayout()
-        logo_area.setSpacing(2)
-        logo_area.setContentsMargins(8, 0, 0, 0)
+        # Logo
+        name_lbl = QLabel("Neural Forge")
+        name_lbl.setObjectName("appTitle")
+        name_lbl.setContentsMargins(6, 0, 0, 0)
+        layout.addWidget(name_lbl)
 
-        app_name = QLabel("Neural Forge")
-        app_name.setObjectName("appTitle")
-        logo_area.addWidget(app_name)
+        sub_lbl = QLabel("EDGE AI STUDIO")
+        sub_lbl.setObjectName("appSubtitle")
+        sub_lbl.setContentsMargins(6, 2, 0, 0)
+        layout.addWidget(sub_lbl)
 
-        app_sub = QLabel("EDGE AI STUDIO")
-        app_sub.setObjectName("appSubtitle")
-        logo_area.addWidget(app_sub)
+        layout.addSpacing(18)
 
-        layout.addLayout(logo_area)
-        layout.addSpacing(20)
-
-        # ── Séparateur ──
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(
-            "background-color: #2C2C2E; max-height: 1px; border: none;"
-        )
+        sep.setStyleSheet("background:rgba(255,255,255,0.07);max-height:1px;border:none;")
         layout.addWidget(sep)
-        layout.addSpacing(12)
+        layout.addSpacing(10)
 
-        # ── Boutons de navigation ──
-        self._nav_buttons: list[NavButton] = []
-        for i, (icon, label, tooltip) in enumerate(_NAV_ITEMS):
-            btn = NavButton(icon, label, tooltip)
-            btn.clicked.connect(lambda checked, idx=i: self._switch_tab(idx))
+        self._nav_btns: list[NavBtn] = []
+        for i, (badge, label, tip) in enumerate(_NAV):
+            btn = NavBtn(badge, label, tip)
+            btn.clicked.connect(lambda _, idx=i: self._switch(idx))
             layout.addWidget(btn)
             layout.addSpacing(2)
-            self._nav_buttons.append(btn)
+            self._nav_btns.append(btn)
 
         layout.addStretch()
 
-        # ── Version ──
-        version = QLabel("v0.1.0 — alpha")
-        version.setObjectName("versionLabel")
-        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(version)
+        ver = QLabel("v0.1.0 — alpha")
+        ver.setObjectName("versionLabel")
+        ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(ver)
 
-        return sidebar
+        return sb
 
-    def _build_status_bar(self):
-        self.status_bar = QStatusBar()
-        self.setStatusBar(self.status_bar)
-
-        self._status_model_dot = QLabel()
-        self._status_model_dot.setFixedSize(8, 8)
-        self._set_status_dot("#3A3A3C")
-        self.status_bar.addWidget(self._status_model_dot)
-        self.status_bar.addWidget(QLabel(" "))
-
-        self._status_model_label = QLabel("Aucun modèle chargé")
-        self.status_bar.addWidget(self._status_model_label)
-
-        self.status_bar.addPermanentWidget(
-            QLabel("Neural Forge  ·  Edge AI  ·  100% local")
+    @staticmethod
+    def _scrollable(widget: QWidget) -> QScrollArea:
+        """Enveloppe un onglet dans une QScrollArea pour le responsive."""
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setWidget(widget)
+        area.setStyleSheet(
+            "QScrollArea{background:#161618;border:none;}"
+            "QScrollArea > QWidget > QWidget{background:#161618;}"
         )
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        return area
 
-    # ------------------------------------------------------------------
-    # Navigation
-    # ------------------------------------------------------------------
+    def _build_statusbar(self):
+        sb = QStatusBar()
+        self.setStatusBar(sb)
 
-    def _switch_tab(self, index: int):
-        self.stack.setCurrentIndex(index)
-        for i, btn in enumerate(self._nav_buttons):
-            btn.set_active(i == index)
+        self._sb_dot = QLabel()
+        self._sb_dot.setFixedSize(8, 8)
+        self._sb_dot_color("#3A3A3C")
+        sb.addWidget(self._sb_dot)
+        sb.addWidget(QLabel(" "))
 
-    # ------------------------------------------------------------------
-    # Slot : modèle chargé
-    # ------------------------------------------------------------------
+        self._sb_lbl = QLabel("Aucun modèle chargé")
+        sb.addWidget(self._sb_lbl)
+
+        sb.addPermanentWidget(QLabel("Neural Forge  ·  Edge AI  ·  100% local"))
+
+    def _switch(self, idx: int):
+        self.stack.setCurrentIndex(idx)
+        for i, btn in enumerate(self._nav_btns):
+            btn.set_active(i == idx)
 
     @pyqtSlot(str, str)
     def _on_model_loaded(self, model_path: str, lora_path: str):
         import os
         name = os.path.basename(model_path)
         lora = f" + {os.path.basename(lora_path)}" if lora_path else ""
-
-        self._set_status_dot("#30D158")
-        self._status_model_label.setText(f"{name}{lora}")
-
-        # Notifie l'onglet Chat
+        self._sb_dot_color("#30D158")
+        self._sb_lbl.setText(f"{name}{lora}")
         self.chat_tab.on_model_loaded(model_path, lora_path)
 
-    def _set_status_dot(self, color: str):
-        self._status_model_dot.setStyleSheet(
-            f"background-color: {color}; border-radius: 4px;"
-            " min-width: 8px; max-width: 8px;"
-            " min-height: 8px; max-height: 8px;"
+    def _sb_dot_color(self, c: str):
+        self._sb_dot.setStyleSheet(
+            f"background-color:{c};border-radius:4px;"
+            "min-width:8px;max-width:8px;min-height:8px;max-height:8px;"
         )

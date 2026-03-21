@@ -1,32 +1,20 @@
 """
-settings_tab.py — Onglet Paramètres & Chargement du modèle.
-
-Permet de :
-  - Choisir le fichier .gguf du modèle
-  - Choisir un adaptateur .lora (optionnel)
-  - Ajuster n_ctx et max_tokens
-  - Charger le modèle via un worker (non-bloquant)
-  - Voir l'état du modèle actif
+settings_tab.py — Onglet Paramètres redesigné.
 """
 
 import os
-
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QFileDialog, QSpinBox,
-    QFrame, QScrollArea, QSizePolicy,
+    QPushButton, QSpinBox,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
-
+from PyQt6.QtCore import pyqtSignal
 from gui.workers import ModelLoadWorker
+from gui.widgets import FilePickerRow
 
 
 class SettingsTab(QWidget):
-    """Onglet de configuration et chargement du modèle."""
 
-    # Émis quand le modèle est chargé avec succès → notifie MainWindow
-    model_loaded = pyqtSignal(str, str)   # (model_path, lora_path or "")
+    model_loaded = pyqtSignal(str, str)
 
     def __init__(self, llm_node, parent=None):
         super().__init__(parent)
@@ -34,239 +22,169 @@ class SettingsTab(QWidget):
         self._worker = None
         self._build_ui()
 
-    # ------------------------------------------------------------------
-    # Construction de l'interface
-    # ------------------------------------------------------------------
-
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(32, 28, 32, 28)
+        root.setContentsMargins(36, 32, 36, 32)
         root.setSpacing(0)
 
-        # ── Titre ──
         title = QLabel("Paramètres")
         title.setObjectName("pageTitle")
         root.addWidget(title)
-        root.addSpacing(6)
+        root.addSpacing(4)
+        sub = QLabel("Configuration du modèle et de l'inférence")
+        sub.setObjectName("pageSubtitle")
+        root.addWidget(sub)
+        root.addSpacing(32)
 
-        subtitle = QLabel("Configuration du modèle et des paramètres d'inférence")
-        subtitle.setObjectName("statusLabel")
-        root.addWidget(subtitle)
-        root.addSpacing(28)
-
-        # ── Section : Modèle ──
-        root.addWidget(self._section_label("MODÈLE"))
+        root.addWidget(self._section("MODÈLE"))
         root.addSpacing(10)
 
         model_card = self._card()
-        card_layout = QVBoxLayout(model_card)
-        card_layout.setContentsMargins(20, 20, 20, 20)
-        card_layout.setSpacing(14)
+        cl = QVBoxLayout(model_card)
+        cl.setContentsMargins(20, 20, 20, 20)
+        cl.setSpacing(10)
 
-        # Champ modèle
-        card_layout.addWidget(self._field_label("Fichier modèle (.gguf)"))
-        model_row = QHBoxLayout()
-        model_row.setSpacing(8)
-        self.model_path_edit = QLineEdit()
-        self.model_path_edit.setPlaceholderText("Sélectionnez un fichier .gguf …")
-        model_row.addWidget(self.model_path_edit)
-        btn_model = QPushButton("…")
-        btn_model.setObjectName("browseBtn")
-        btn_model.setToolTip("Parcourir")
-        btn_model.clicked.connect(self._browse_model)
-        model_row.addWidget(btn_model)
-        card_layout.addLayout(model_row)
-
-        # Champ LoRA
-        card_layout.addWidget(self._field_label("Adaptateur LoRA (optionnel)"))
-        lora_row = QHBoxLayout()
-        lora_row.setSpacing(8)
-        self.lora_path_edit = QLineEdit()
-        self.lora_path_edit.setPlaceholderText("Laissez vide pour le modèle de base …")
-        lora_row.addWidget(self.lora_path_edit)
-        btn_lora = QPushButton("…")
-        btn_lora.setObjectName("browseBtn")
-        btn_lora.setToolTip("Parcourir")
-        btn_lora.clicked.connect(self._browse_lora)
-        lora_row.addWidget(btn_lora)
-        card_layout.addLayout(lora_row)
-
+        cl.addWidget(self._lbl("Fichier modèle  (.gguf)"))
+        self.model_picker = FilePickerRow(
+            placeholder="Sélectionnez un modèle GGUF…",
+            icon="🧠",
+            filters="Modèles GGUF (*.gguf);;Tous (*)",
+            dialog_title="Choisir un modèle",
+            start_dir="models/",
+        )
+        cl.addWidget(self.model_picker)
+        cl.addSpacing(4)
+        cl.addWidget(self._lbl("Adaptateur LoRA  (optionnel)"))
+        self.lora_picker = FilePickerRow(
+            placeholder="Laissez vide pour le modèle de base…",
+            icon="🧬",
+            filters="Adaptateurs LoRA (*.lora *.bin);;Tous (*)",
+            dialog_title="Choisir un adaptateur LoRA",
+            start_dir="models/",
+        )
+        cl.addWidget(self.lora_picker)
         root.addWidget(model_card)
         root.addSpacing(20)
 
-        # ── Section : Paramètres ──
-        root.addWidget(self._section_label("INFÉRENCE"))
+        root.addWidget(self._section("INFÉRENCE"))
         root.addSpacing(10)
 
-        params_card = self._card()
-        params_layout = QVBoxLayout(params_card)
-        params_layout.setContentsMargins(20, 20, 20, 20)
-        params_layout.setSpacing(14)
+        inf_card = self._card()
+        il = QHBoxLayout(inf_card)
+        il.setContentsMargins(20, 18, 20, 18)
+        il.setSpacing(24)
 
-        row1 = QHBoxLayout()
-        row1.setSpacing(20)
+        for label, attr, lo, hi, val, step, tip in [
+            ("Contexte (tokens)", "ctx_spin", 512, 32768, 2048, 512,
+             "Mémoire à court terme du modèle"),
+            ("Réponse max (tokens)", "max_tok_spin", 50, 4096, 200, 50,
+             "Longueur maximale de la réponse générée"),
+        ]:
+            col = QVBoxLayout()
+            col.setSpacing(6)
+            col.addWidget(self._lbl(label))
+            spin = QSpinBox()
+            spin.setRange(lo, hi)
+            spin.setValue(val)
+            spin.setSingleStep(step)
+            spin.setToolTip(tip)
+            setattr(self, attr, spin)
+            col.addWidget(spin)
+            il.addLayout(col)
+        il.addStretch()
+        root.addWidget(inf_card)
+        root.addSpacing(28)
 
-        # n_ctx
-        col_ctx = QVBoxLayout()
-        col_ctx.setSpacing(6)
-        col_ctx.addWidget(self._field_label("Fenêtre de contexte"))
-        self.ctx_spin = QSpinBox()
-        self.ctx_spin.setRange(512, 32768)
-        self.ctx_spin.setValue(2048)
-        self.ctx_spin.setSingleStep(512)
-        self.ctx_spin.setToolTip("Nombre de tokens mémorisés (RAM)")
-        col_ctx.addWidget(self.ctx_spin)
-        row1.addLayout(col_ctx)
-
-        # max_tokens
-        col_tok = QVBoxLayout()
-        col_tok.setSpacing(6)
-        col_tok.addWidget(self._field_label("Tokens max en sortie"))
-        self.max_tokens_spin = QSpinBox()
-        self.max_tokens_spin.setRange(50, 4096)
-        self.max_tokens_spin.setValue(200)
-        self.max_tokens_spin.setSingleStep(50)
-        self.max_tokens_spin.setToolTip("Longueur maximale de la réponse")
-        col_tok.addWidget(self.max_tokens_spin)
-        row1.addLayout(col_tok)
-        row1.addStretch()
-
-        params_layout.addLayout(row1)
-        root.addWidget(params_card)
-        root.addSpacing(24)
-
-        # ── Bouton charger ──
         self.load_btn = QPushButton("  Charger le modèle")
         self.load_btn.setObjectName("primaryBtn")
         self.load_btn.setFixedHeight(46)
-        self.load_btn.clicked.connect(self._load_model)
+        self.load_btn.clicked.connect(self._load)
         root.addWidget(self.load_btn)
-        root.addSpacing(20)
+        root.addSpacing(24)
 
-        # ── Status du modèle actif ──
-        root.addWidget(self._section_label("MODÈLE ACTIF"))
+        root.addWidget(self._section("MODÈLE ACTIF"))
         root.addSpacing(10)
 
-        self.status_card = self._card()
-        status_layout = QVBoxLayout(self.status_card)
-        status_layout.setContentsMargins(20, 18, 20, 18)
-        status_layout.setSpacing(10)
+        st_card = self._card()
+        sl = QVBoxLayout(st_card)
+        sl.setContentsMargins(20, 16, 20, 16)
+        sl.setSpacing(8)
 
-        status_row = QHBoxLayout()
-        self.status_dot = QLabel()
-        self.status_dot.setObjectName("statusDot")
-        self.status_dot.setFixedSize(10, 10)
-        self._set_dot_color("#3A3A3C")
-        status_row.addWidget(self.status_dot)
-        self.status_text = QLabel("Aucun modèle chargé")
-        self.status_text.setObjectName("statusLabel")
-        status_row.addWidget(self.status_text)
-        status_row.addStretch()
-        status_layout.addLayout(status_row)
+        dot_row = QHBoxLayout()
+        self._dot = QLabel()
+        self._dot.setFixedSize(10, 10)
+        self._dot_color("#3A3A3C")
+        dot_row.addWidget(self._dot)
+        dot_row.addSpacing(8)
+        self._st_text = QLabel("Aucun modèle chargé")
+        self._st_text.setObjectName("pageSubtitle")
+        dot_row.addWidget(self._st_text)
+        dot_row.addStretch()
+        sl.addLayout(dot_row)
 
-        self.model_info_label = QLabel("")
-        self.model_info_label.setObjectName("statusLabel")
-        self.model_info_label.setWordWrap(True)
-        status_layout.addWidget(self.model_info_label)
-        self.model_info_label.hide()
-
-        root.addWidget(self.status_card)
+        self._st_detail = QLabel("")
+        self._st_detail.setObjectName("sectionLabel")
+        self._st_detail.setWordWrap(True)
+        sl.addWidget(self._st_detail)
+        self._st_detail.hide()
+        root.addWidget(st_card)
         root.addStretch()
 
-    # ------------------------------------------------------------------
-    # Helpers UI
-    # ------------------------------------------------------------------
+    def _section(self, t):
+        l = QLabel(t); l.setObjectName("sectionLabel"); return l
 
-    def _section_label(self, text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setObjectName("sectionLabel")
-        return lbl
+    def _lbl(self, t):
+        l = QLabel(t)
+        l.setStyleSheet("color: #636366; font-size: 12px; background: transparent;")
+        return l
 
-    def _field_label(self, text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setObjectName("statusLabel")
-        font = lbl.font()
-        font.setPointSize(12)
-        lbl.setFont(font)
-        return lbl
+    def _card(self):
+        w = QWidget(); w.setObjectName("card"); return w
 
-    def _card(self) -> QWidget:
-        card = QWidget()
-        card.setObjectName("card")
-        return card
-
-    def _set_dot_color(self, color: str):
-        self.status_dot.setStyleSheet(
-            f"background-color: {color}; border-radius: 5px;"
-            " min-width: 10px; max-width: 10px;"
-            " min-height: 10px; max-height: 10px;"
+    def _dot_color(self, c):
+        self._dot.setStyleSheet(
+            f"background-color:{c}; border-radius:5px;"
+            " min-width:10px; max-width:10px;"
+            " min-height:10px; max-height:10px;"
         )
 
-    # ------------------------------------------------------------------
-    # Slots
-    # ------------------------------------------------------------------
-
-    def _browse_model(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Sélectionner un modèle", "models/",
-            "Modèles GGUF (*.gguf);;Tous les fichiers (*)"
-        )
-        if path:
-            self.model_path_edit.setText(path)
-
-    def _browse_lora(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Sélectionner un adaptateur LoRA", "models/",
-            "Adaptateurs LoRA (*.lora *.bin);;Tous les fichiers (*)"
-        )
-        if path:
-            self.lora_path_edit.setText(path)
-
-    def _load_model(self):
-        model_path = self.model_path_edit.text().strip()
+    def _load(self):
+        model_path = self.model_picker.get_path()
         if not model_path:
-            self._set_status("error", "Veuillez sélectionner un fichier modèle.")
+            self._dot_color("#FF453A")
+            self._st_text.setText("Sélectionnez un fichier modèle")
             return
-
-        lora_path = self.lora_path_edit.text().strip() or None
-
+        lora_path = self.lora_picker.get_path() or None
         self.load_btn.setEnabled(False)
-        self.load_btn.setText("  Chargement en cours…")
-        self._set_dot_color("#FF9F0A")
-        self.status_text.setText("Chargement du modèle…")
-        self.model_info_label.hide()
+        self.load_btn.setText("  Chargement…")
+        self._dot_color("#FF9F0A")
+        self._st_text.setText("Chargement en cours…")
+        self._st_detail.hide()
 
         self._worker = ModelLoadWorker(self.llm_node, model_path, lora_path)
-        self._worker.success.connect(self._on_load_success)
-        self._worker.error.connect(self._on_load_error)
-        self._worker.finished.connect(self._on_load_finished)
+        self._worker.success.connect(self._ok)
+        self._worker.error.connect(self._err)
+        self._worker.finished.connect(lambda: (
+            self.load_btn.setEnabled(True),
+            self.load_btn.setText("  Charger le modèle"),
+        ))
         self._worker.start()
 
-    def _on_load_success(self, model_path: str):
-        lora_path = self.lora_path_edit.text().strip()
-        model_name = os.path.basename(model_path)
-        lora_info = f"LoRA : {os.path.basename(lora_path)}" if lora_path else "LoRA : aucun"
-
-        self._set_dot_color("#30D158")
-        self.status_text.setText(f"Modèle chargé : {model_name}")
-        self.model_info_label.setText(
-            f"Contexte : {self.ctx_spin.value()} tokens  ·  "
-            f"Max tokens : {self.max_tokens_spin.value()}  ·  {lora_info}"
+    def _ok(self, model_path):
+        lora = self.lora_picker.get_path()
+        name = os.path.basename(model_path)
+        lora_info = f"LoRA : {os.path.basename(lora)}" if lora else "Sans LoRA"
+        self._dot_color("#30D158")
+        self._st_text.setText(name)
+        self._st_detail.setText(
+            f"Contexte : {self.ctx_spin.value()} t  ·  "
+            f"Max : {self.max_tok_spin.value()} t  ·  {lora_info}"
         )
-        self.model_info_label.show()
-        self.model_loaded.emit(model_path, lora_path or "")
+        self._st_detail.show()
+        self.model_loaded.emit(model_path, lora or "")
 
-    def _on_load_error(self, message: str):
-        self._set_dot_color("#FF453A")
-        self.status_text.setText("Échec du chargement")
-        self.model_info_label.setText(message)
-        self.model_info_label.show()
-
-    def _on_load_finished(self):
-        self.load_btn.setEnabled(True)
-        self.load_btn.setText("  Charger le modèle")
-
-    def _set_status(self, level: str, msg: str):
-        colors = {"error": "#FF453A", "success": "#30D158", "info": "#0A84FF"}
-        self._set_dot_color(colors.get(level, "#8E8E93"))
-        self.status_text.setText(msg)
+    def _err(self, msg):
+        self._dot_color("#FF453A")
+        self._st_text.setText("Échec du chargement")
+        self._st_detail.setText(msg)
+        self._st_detail.show()
