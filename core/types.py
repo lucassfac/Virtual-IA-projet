@@ -1,24 +1,69 @@
 from enum import Enum
 import uuid
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-# 1. Liste des types de données acceptés par ton moteur
+
 class DataType(Enum):
-    TEXT = "text"              # Pour le Chatbot
-    IMAGE_PATH = "image_path"  # Pour la Webcam / LLaVA (On passe le chemin du fichier)
-    AUDIO_PATH = "audio_path"  # Pour le Micro / Whisper
-    any = "any"                # Joker (pour les nœuds de debug)
+    TEXT = "text"
+    IMAGE_PATH = "image_path"
+    AUDIO_PATH = "audio_path"
+    ANY = "any"
 
-# 2. L'enveloppe qui va voyager de nœud en nœud
+
 class DataPacket:
-    def __init__(self, data_type: DataType, content: Any, metadata: Optional[Dict] = None):
-        self.id = str(uuid.uuid4())      # ID unique pour tracer le paquet (debug)
-        self.timestamp = time.time()     # Pour mesurer la latence
-        self.data_type = data_type       # Le type (ex: DataType.TEXT)
-        self.content = content           # La donnée réelle (ex: "Bonjour" ou "/tmp/img.jpg")
-        self.metadata = metadata or {}   # Infos bonus (ex: {"confidence": 0.98})
+    """
+    Enveloppe universelle qui circule entre tous les nœuds du pipeline.
+    Embarque traçabilité, horodatage et métadonnées.
+    """
 
-    def __repr__(self):
-        # Pour un affichage propre dans la console quand tu feras print(packet)
-        return f"<DataPacket type={self.data_type.value} content={str(self.content)[:20]}...>"
+    def __init__(
+        self,
+        data_type: DataType,
+        content: Any,
+        metadata: Optional[Dict] = None,
+        source: str = "unknown",
+    ):
+        self.id = str(uuid.uuid4())
+        self.timestamp = time.time()
+        self.data_type = data_type
+        self.content = content
+        self.metadata: Dict = metadata or {}
+        self.source = source
+        self._processing_log: List[Dict] = []
+
+    # ------------------------------------------------------------------
+    # Traceability
+    # ------------------------------------------------------------------
+
+    def log_step(self, node_name: str, action: str) -> None:
+        """Enregistre une étape de traitement pour la traçabilité complète."""
+        self._processing_log.append(
+            {
+                "timestamp": time.time(),
+                "node": node_name,
+                "action": action,
+            }
+        )
+
+    def get_trace(self) -> str:
+        """Retourne un journal lisible du parcours du paquet."""
+        if not self._processing_log:
+            return f"[{self.id[:8]}] Aucune étape enregistrée."
+        lines = [f"[{self.id[:8]}] Trace du paquet :"]
+        for step in self._processing_log:
+            t = time.strftime("%H:%M:%S", time.localtime(step["timestamp"]))
+            lines.append(f"  {t} | {step['node']} → {step['action']}")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Dunder
+    # ------------------------------------------------------------------
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataPacket id={self.id[:8]} "
+            f"type={self.data_type.value} "
+            f"src={self.source} "
+            f"content={str(self.content)[:30]}...>"
+        )

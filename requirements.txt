@@ -1,0 +1,12 @@
+# Moteur IA local
+llama-cpp-python>=0.2.0
+
+# Interface graphique
+PyQt6>=6.4.0
+
+# Tests
+pytest>=7.4.0
+pytest-qt>=4.2.0
+
+# Optionnel : support GPU CUDA (décommenter si GPU disponible)
+# llama-cpp-python[cuda]>=0.2.0
