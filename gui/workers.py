@@ -144,3 +144,58 @@ class ModelLoadWorker(QThread):
             self.error.emit(str(e))
         finally:
             self.finished.emit()
+
+
+class SearchWorker(QThread):
+    """Recherche de modèles HuggingFace dans un thread."""
+    results = pyqtSignal(list)
+    error   = pyqtSignal(str)
+    finished = pyqtSignal()
+
+    def __init__(self, query: str):
+        super().__init__()
+        self.query = query
+
+    def run(self):
+        try:
+            from core.model_manager import search_models
+            data = search_models(self.query)
+            self.results.emit(data)
+        except Exception as e:
+            self.error.emit(str(e))
+        finally:
+            self.finished.emit()
+
+
+class DownloadWorker(QThread):
+    """Téléchargement d'un modèle GGUF depuis HuggingFace."""
+    progress  = pyqtSignal(int, int)   # (bytes_done, bytes_total)
+    success   = pyqtSignal(str)        # chemin absolu
+    error     = pyqtSignal(str)
+    finished  = pyqtSignal()
+
+    def __init__(self, repo_id: str, filename: str, dest_dir: str, token: str = ""):
+        super().__init__()
+        self.repo_id  = repo_id
+        self.filename = filename
+        self.dest_dir = dest_dir
+        self.token    = token
+        self._cancel  = [False]
+
+    def cancel(self):
+        self._cancel[0] = True
+
+    def run(self):
+        try:
+            from core.model_manager import download_model
+            path = download_model(
+                self.repo_id, self.filename, self.dest_dir,
+                progress_cb=lambda d, t: self.progress.emit(d, t),
+                cancel_flag=self._cancel,
+                token=self.token,
+            )
+            self.success.emit(path)
+        except Exception as e:
+            self.error.emit(str(e))
+        finally:
+            self.finished.emit()

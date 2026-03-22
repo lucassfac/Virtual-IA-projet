@@ -73,6 +73,10 @@ output/
 *.jpg
 *.png
 
+# --- TOKEN HUGGING 
+
+.neural_forge_config.json
+
 # --- OS ---
 .DS_Store
 Thumbs.db

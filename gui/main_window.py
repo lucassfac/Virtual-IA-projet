@@ -1,9 +1,6 @@
 """
 main_window.py — Fenêtre principale Neural Forge.
-- Icônes texte (pas emoji) pour compatibilité Linux/WSL
-- Layout responsive avec QScrollArea
-- Chat multimodal (fusion Chat + Vision)
-- 3 onglets : Chat, Entraînement, Paramètres
+4 onglets : Chat, Bibliothèque, Entraînement, Paramètres
 """
 
 from PyQt6.QtWidgets import (
@@ -12,48 +9,36 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QFrame, QScrollArea,
 )
 from PyQt6.QtCore import Qt, pyqtSlot, QSize
-from PyQt6.QtGui import QFont
 
 from core.nodes.llm_node import LLMNode
 from core.nodes.vision_node import VisionNode
 
 from gui.tabs.chat_tab import ChatTab
+from gui.tabs.models_tab import ModelsTab
 from gui.tabs.training_tab import TrainingTab
 from gui.tabs.settings_tab import SettingsTab
 
 
-# Icônes ASCII — rendu fiable sur tous les OS
 _NAV = [
-    ("MSG",  "Chat",           "Discuter avec l'IA"),
-    ("TRN",  "Entraînement",   "Spécialiser un modèle"),
-    ("CFG",  "Paramètres",     "Configurer l'application"),
+    ("Chat",          "Discuter avec l'IA"),
+    ("Bibliothèque",  "Gérer les modèles"),
+    ("Entraînement",  "Spécialiser un modèle"),
+    ("Paramètres",    "Configurer l'application"),
 ]
 
 
 class NavBtn(QPushButton):
-    def __init__(self, badge: str, label: str, tip: str, parent=None):
-        super().__init__(parent)
-        self._badge = badge
-        self._label = label
+    def __init__(self, label: str, tip: str, parent=None):
+        super().__init__(f"  {label}", parent)
         self.setToolTip(tip)
         self.setObjectName("navBtn")
-        self.setCheckable(False)
         self.setFixedHeight(42)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._refresh(False)
 
     def set_active(self, on: bool):
         self.setProperty("active", "true" if on else "false")
         self.style().unpolish(self)
         self.style().polish(self)
-        self._refresh(on)
-
-    def _refresh(self, on: bool):
-        dot_color = "#0A84FF" if on else "#3A3A3C"
-        self.setText(f"  {self._label}")
-        self.setStyleSheet(
-            self.styleSheet()  # keep QSS objectName rules
-        )
 
 
 class MainWindow(QMainWindow):
@@ -62,9 +47,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Neural Forge")
         self.setMinimumSize(QSize(720, 500))
-        self.resize(QSize(1040, 660))
+        self.resize(QSize(1060, 680))
 
-        self.llm_node = LLMNode(name="LLM-Principal")
+        self.llm_node    = LLMNode(name="LLM-Principal")
         self.vision_node = VisionNode(name="Vision-Principal")
 
         self._build_ui()
@@ -79,26 +64,27 @@ class MainWindow(QMainWindow):
         main.setContentsMargins(0, 0, 0, 0)
         main.setSpacing(0)
 
-        # ── Sidebar ──
         main.addWidget(self._make_sidebar())
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet("background:rgba(255,255,255,0.06);max-width:1px;border:none;")
+        sep.setStyleSheet(
+            "background:rgba(255,255,255,0.06);max-width:1px;border:none;"
+        )
         main.addWidget(sep)
 
-        # ── Stack ──
         self.stack = QStackedWidget()
         self.stack.setObjectName("contentArea")
 
-        self.chat_tab = ChatTab(self.llm_node, self.vision_node)
+        self.chat_tab     = ChatTab(self.llm_node, self.vision_node)
+        self.models_tab   = ModelsTab()
         self.training_tab = TrainingTab()
         self.settings_tab = SettingsTab(self.llm_node)
 
-        # Wrap settings & training in scroll areas for responsiveness
-        self.stack.addWidget(self.chat_tab)                         # 0 — pas de scroll (chat scroll lui-même)
-        self.stack.addWidget(self._scrollable(self.training_tab))   # 1
-        self.stack.addWidget(self._scrollable(self.settings_tab))   # 2
+        self.stack.addWidget(self.chat_tab)                          # 0
+        self.stack.addWidget(self._scroll(self.models_tab))          # 1
+        self.stack.addWidget(self._scroll(self.training_tab))        # 2
+        self.stack.addWidget(self._scroll(self.settings_tab))        # 3
 
         main.addWidget(self.stack, stretch=1)
 
@@ -114,7 +100,6 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 20, 10, 14)
         layout.setSpacing(0)
 
-        # Logo
         name_lbl = QLabel("Neural Forge")
         name_lbl.setObjectName("appTitle")
         name_lbl.setContentsMargins(6, 0, 0, 0)
@@ -129,13 +114,15 @@ class MainWindow(QMainWindow):
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("background:rgba(255,255,255,0.07);max-height:1px;border:none;")
+        sep.setStyleSheet(
+            "background:rgba(255,255,255,0.07);max-height:1px;border:none;"
+        )
         layout.addWidget(sep)
         layout.addSpacing(10)
 
         self._nav_btns: list[NavBtn] = []
-        for i, (badge, label, tip) in enumerate(_NAV):
-            btn = NavBtn(badge, label, tip)
+        for i, (label, tip) in enumerate(_NAV):
+            btn = NavBtn(label, tip)
             btn.clicked.connect(lambda _, idx=i: self._switch(idx))
             layout.addWidget(btn)
             layout.addSpacing(2)
@@ -151,8 +138,7 @@ class MainWindow(QMainWindow):
         return sb
 
     @staticmethod
-    def _scrollable(widget: QWidget) -> QScrollArea:
-        """Enveloppe un onglet dans une QScrollArea pour le responsive."""
+    def _scroll(widget: QWidget) -> QScrollArea:
         area = QScrollArea()
         area.setWidgetResizable(True)
         area.setWidget(widget)
@@ -167,22 +153,25 @@ class MainWindow(QMainWindow):
     def _build_statusbar(self):
         sb = QStatusBar()
         self.setStatusBar(sb)
-
         self._sb_dot = QLabel()
         self._sb_dot.setFixedSize(8, 8)
         self._sb_dot_color("#3A3A3C")
         sb.addWidget(self._sb_dot)
         sb.addWidget(QLabel(" "))
-
         self._sb_lbl = QLabel("Aucun modèle chargé")
         sb.addWidget(self._sb_lbl)
-
         sb.addPermanentWidget(QLabel("Neural Forge  ·  Edge AI  ·  100% local"))
 
     def _switch(self, idx: int):
         self.stack.setCurrentIndex(idx)
         for i, btn in enumerate(self._nav_btns):
             btn.set_active(i == idx)
+        # Refresh liste installés à chaque visite de la bibliothèque
+        if idx == 1:
+            # Forcer une relecture du dossier models/ à chaque visite
+            from core.model_manager import get_models_dir, list_local_models
+            get_models_dir()  # crée le dossier si absent
+            self.models_tab.refresh_installed()
 
     @pyqtSlot(str, str)
     def _on_model_loaded(self, model_path: str, lora_path: str):
@@ -192,6 +181,8 @@ class MainWindow(QMainWindow):
         self._sb_dot_color("#30D158")
         self._sb_lbl.setText(f"{name}{lora}")
         self.chat_tab.on_model_loaded(model_path, lora_path)
+        # Refresh bibliothèque pour marquer le modèle actif
+        self.models_tab.refresh_installed()
 
     def _sb_dot_color(self, c: str):
         self._sb_dot.setStyleSheet(
