@@ -14,14 +14,33 @@ from gui.widgets import FilePickerRow
 from core.model_manager import save_hf_token, load_hf_token, clear_hf_token
 
 
+
+def _open_url(url: str) -> None:
+    """Ouvre une URL dans le navigateur — compatible WSL, Windows natif, Linux."""
+    import subprocess, sys, os
+    try:
+        if sys.platform == "win32":
+            os.startfile(url)
+        elif "microsoft" in open("/proc/version").read().lower():
+            # WSL → délègue à explorer.exe Windows
+            subprocess.Popen(["explorer.exe", url])
+        else:
+            subprocess.Popen(["xdg-open", url])
+    except Exception:
+        pass
+
+
 class SettingsTab(QWidget):
 
-    model_loaded = pyqtSignal(str, str)
+    model_loaded        = pyqtSignal(str, str)   # LLM chargé
+    vision_model_loaded = pyqtSignal(str, str)   # LLaVA chargé (model, mmproj)
 
-    def __init__(self, llm_node, parent=None):
+    def __init__(self, llm_node, vision_node=None, parent=None):
         super().__init__(parent)
-        self.llm_node = llm_node
-        self._worker = None
+        self.llm_node    = llm_node
+        self.vision_node = vision_node
+        self._worker     = None
+        self._vision_worker = None
         self._build_ui()
 
     def _build_ui(self):
@@ -103,15 +122,17 @@ class SettingsTab(QWidget):
         )
         hl.addWidget(self._token_status)
 
-        # Lien d'aide
-        help_lbl = QLabel(
-            '<a href="https://huggingface.co/settings/tokens" '
-            'style="color:#409CFF;font-size:11px;">'
-            'Créer un token sur huggingface.co →</a>'
+        # Lien d'aide — compatible WSL et Windows natif
+        help_btn = QPushButton("Créer un token sur huggingface.co →")
+        help_btn.setStyleSheet(
+            "background:transparent;border:none;"
+            "color:#409CFF;font-size:11px;text-align:left;padding:0;"
         )
-        help_lbl.setOpenExternalLinks(True)
-        help_lbl.setStyleSheet("background:transparent;")
-        hl.addWidget(help_lbl)
+        help_btn.setCursor(__import__('PyQt6.QtGui', fromlist=['QCursor']).QCursor(
+            __import__('PyQt6.QtCore', fromlist=['Qt']).Qt.CursorShape.PointingHandCursor
+        ))
+        help_btn.clicked.connect(lambda: _open_url("https://huggingface.co/settings/tokens"))
+        hl.addWidget(help_btn)
 
         root.addWidget(hf_card)
         root.addSpacing(20)
@@ -153,6 +174,54 @@ class SettingsTab(QWidget):
         )
         cl.addWidget(self.lora_picker)
         root.addWidget(model_card)
+        root.addSpacing(20)
+
+        # ── Card : Vision (LLaVA) ──
+        root.addWidget(self._section("VISION  (MULTIMODAL)"))
+        root.addSpacing(10)
+
+        vision_card = self._card()
+        vl = QVBoxLayout(vision_card)
+        vl.setContentsMargins(20, 20, 20, 20)
+        vl.setSpacing(10)
+
+        vl.addWidget(self._lbl("Modèle LLaVA  (.gguf)"))
+        self.llava_picker = FilePickerRow(
+            placeholder="Sélectionnez un modèle LLaVA…",
+            icon="👁",
+            filters="Modèles GGUF (*.gguf);;Tous (*)",
+            dialog_title="Choisir un modèle LLaVA",
+            start_dir="models/",
+        )
+        vl.addWidget(self.llava_picker)
+
+        vl.addSpacing(4)
+        vl.addWidget(self._lbl("Projecteur multimodal  (mmproj .gguf)"))
+        self.mmproj_picker = FilePickerRow(
+            placeholder="Sélectionnez le fichier mmproj…",
+            icon="🔮",
+            filters="Projecteur mmproj (*.gguf);;Tous (*)",
+            dialog_title="Choisir le fichier mmproj",
+            start_dir="models/",
+        )
+        vl.addWidget(self.mmproj_picker)
+
+        # Bouton charger LLaVA
+        self._load_vision_btn = QPushButton("  Charger le modèle Vision")
+        self._load_vision_btn.setObjectName("primaryBtn")
+        self._load_vision_btn.setFixedHeight(40)
+        self._load_vision_btn.setStyleSheet(
+            "QPushButton#primaryBtn{font-size:13px;min-height:40px;border-radius:10px;}"
+        )
+        self._load_vision_btn.clicked.connect(self._load_vision)
+        vl.addWidget(self._load_vision_btn)
+
+        self._vision_status = QLabel("")
+        self._vision_status.setObjectName("sectionLabel")
+        self._vision_status.setWordWrap(True)
+        vl.addWidget(self._vision_status)
+
+        root.addWidget(vision_card)
         root.addSpacing(20)
 
         # ── Card : Inférence ──
@@ -276,6 +345,95 @@ class SettingsTab(QWidget):
             self.load_btn.setText("  Charger le modèle"),
         ))
         self._worker.start()
+
+    def _load_vision(self):
+        """Charge le modèle LLaVA + mmproj dans le VisionNode."""
+        if self.vision_node is None:
+            self._vision_status.setText("VisionNode non disponible.")
+            return
+        llava_path  = self.llava_picker.get_path()
+        mmproj_path = self.mmproj_picker.get_path()
+        if not llava_path:
+            self._vision_status.setText("⚠ Sélectionnez un modèle LLaVA.")
+            self._vision_status.setStyleSheet("color:#FF9F0A;font-size:11px;background:transparent;")
+            return
+        if not mmproj_path:
+            self._vision_status.setText("⚠ Sélectionnez le fichier mmproj.")
+            self._vision_status.setStyleSheet("color:#FF9F0A;font-size:11px;background:transparent;")
+            return
+
+        self._load_vision_btn.setEnabled(False)
+        self._load_vision_btn.setText("  Chargement Vision…")
+        self._vision_status.setText("Chargement en cours…")
+        self._vision_status.setStyleSheet("color:#636366;font-size:11px;background:transparent;")
+
+        from gui.workers import ModelLoadWorker
+
+        class VisionLoadWorker(ModelLoadWorker):
+            def run(self_w):
+                try:
+                    self_w.llm_node.load_model(self_w.model_path, self_w.lora_path)
+                    self_w.success.emit(self_w.model_path)
+                except Exception as e:
+                    self_w.error.emit(str(e))
+                finally:
+                    self_w.finished.emit()
+
+        # On réutilise ModelLoadWorker mais sur vision_node
+        from gui.workers import ModelLoadWorker as MLW
+        from PyQt6.QtCore import QThread
+        from PyQt6.QtCore import pyqtSignal as pS
+
+        class VisionWorkerLoad(QThread):
+            success  = pS(str)
+            error    = pS(str)
+            finished = pS()
+            def __init__(self_, vnode, mp, mmp):
+                super().__init__()
+                self_.vnode = vnode; self_.mp = mp; self_.mmp = mmp
+            def run(self_):
+                try:
+                    self_.vnode.load_model(self_.mp, self_.mmp)
+                    self_.success.emit(self_.mp)
+                except Exception as e:
+                    self_.error.emit(str(e))
+                finally:
+                    self_.finished.emit()
+
+        self._vision_worker = VisionWorkerLoad(self.vision_node, llava_path, mmproj_path)
+        self._vision_worker.success.connect(self._vision_ok)
+        self._vision_worker.error.connect(self._vision_err)
+        self._vision_worker.finished.connect(lambda: (
+            self._load_vision_btn.setEnabled(True),
+            self._load_vision_btn.setText("  Charger le modèle Vision"),
+        ))
+        self._vision_worker.start()
+
+    def _vision_ok(self, path: str):
+        import os
+        name = os.path.basename(path)
+        self._vision_status.setText(f"✓ LLaVA prêt : {name}")
+        self._vision_status.setStyleSheet("color:#30D158;font-size:11px;background:transparent;")
+        mmproj = self.mmproj_picker.get_path()
+        self.vision_model_loaded.emit(path, mmproj)
+
+    def _vision_err(self, msg: str):
+        if "Failed to load model" in msg or "clip" in msg.lower():
+            friendly = (
+                "Echec LLaVA. Verifiez :\n"
+                "1. Le mmproj doit correspondre exactement au modele LLaVA.\n"
+                "   Pour llava-v1.6-mistral-7b : fichier mmproj-model-f16.gguf\n"
+                "   (repo : cjpais/llava-1.6-mistral-7b-gguf sur HuggingFace)\n"
+                "2. Reinstaller llama-cpp-python avec support vision :\n"
+                "   pip uninstall llama-cpp-python -y\n"
+                '   CMAKE_ARGS="-DLLAVA_BUILD=ON" pip install llama-cpp-python --no-cache-dir'
+            )
+        else:
+            friendly = msg[:200]
+        self._vision_status.setText(friendly)
+        self._vision_status.setStyleSheet(
+            "color:#FF453A;font-size:11px;background:transparent;"
+        )
 
     def _ok(self, model_path):
         lora = self.lora_picker.get_path()

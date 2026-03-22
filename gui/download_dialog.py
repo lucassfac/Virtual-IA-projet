@@ -314,6 +314,7 @@ class DownloadProgressDialog(QDialog):
         import time
         self._start_time = time.time()
         self._last_time = self._start_time
+        self._max_total = 0
 
         abs_dest = get_models_dir()
 
@@ -331,69 +332,79 @@ class DownloadProgressDialog(QDialog):
     @pyqtSlot(int, int)
     def _on_progress(self, done: int, total: int):
         import time
-        if total <= 0:
+        now = time.time()
+
+        # Garder le total max observé (évite 566% si Content-Length change)
+        if not hasattr(self, "_max_total"):
+            self._max_total = total
+        if total > self._max_total:
+            self._max_total = total
+        real_total = max(self._max_total, done)
+
+        if real_total <= 0:
             return
 
-        now = time.time()
-        pct = done / total
+        pct = min(done / real_total, 1.0)
         self._bar.setValue(int(pct * 1000))
         self._detail_bar.setRange(0, 1000)
         self._detail_bar.setValue(int(pct * 1000))
-
         self._pct_lbl.setText(f"{pct*100:.1f}%")
 
-        # Vitesse instantanée sur fenêtre glissante
+        done_mb  = done       / 1024**2
+        total_mb = real_total / 1024**2
+        self._size_lbl.setText(f"{done_mb:.1f} Mo  /  {total_mb:.1f} Mo")
+
         elapsed = now - self._last_time
-        if elapsed > 0.3:
+        if elapsed >= 0.3:
             delta_bytes = done - self._last_bytes
-            speed = delta_bytes / elapsed  # bytes/s
-            self._speed_samples.append(speed)
-            if len(self._speed_samples) > 5:
-                self._speed_samples.pop(0)
-            avg_speed = sum(self._speed_samples) / len(self._speed_samples)
+            if delta_bytes > 0:
+                speed = delta_bytes / elapsed
+                self._speed_samples.append(speed)
+                if len(self._speed_samples) > 6:
+                    self._speed_samples.pop(0)
+                avg_speed = sum(self._speed_samples) / len(self._speed_samples)
+                self._speed_lbl.setText(f"{avg_speed/1024**2:.1f} Mo/s")
 
-            speed_mb = avg_speed / 1024**2
-            self._speed_lbl.setText(f"{speed_mb:.1f} Mo/s")
-
-            # ETA
-            remaining_bytes = total - done
-            if avg_speed > 0:
-                eta_s = remaining_bytes / avg_speed
-                if eta_s < 60:
-                    eta_str = f"{eta_s:.0f}s restantes"
-                elif eta_s < 3600:
-                    eta_str = f"{eta_s/60:.0f} min restantes"
-                else:
-                    eta_str = f"{eta_s/3600:.1f}h restantes"
-                self._eta_lbl.setText(eta_str)
+                remaining = real_total - done
+                if avg_speed > 0 and remaining > 0:
+                    eta_s = remaining / avg_speed
+                    if eta_s < 60:
+                        self._eta_lbl.setText(f"{eta_s:.0f}s restantes")
+                    elif eta_s < 3600:
+                        self._eta_lbl.setText(f"{eta_s/60:.0f} min restantes")
+                    else:
+                        self._eta_lbl.setText(f"{eta_s/3600:.1f}h restantes")
 
             self._last_bytes = done
             self._last_time = now
-
-        done_mb  = done  / 1024**2
-        total_mb = total / 1024**2
-        self._size_lbl.setText(f"{done_mb:.0f} Mo  /  {total_mb:.0f} Mo")
 
     @pyqtSlot(str)
     def _on_success(self, path: str):
         self.result_path = path
         self._bar.setValue(1000)
         self._pct_lbl.setText("100%")
-        self._speed_lbl.setText("Terminé ✓")
+        self._speed_lbl.setText("Installé ✓")
         self._speed_lbl.setStyleSheet(
             "font-size:13px;color:#30D158;font-weight:500;background:transparent;"
         )
         self._eta_lbl.setText(os.path.basename(path))
+        self._size_lbl.setText("Téléchargement terminé")
+
+        # Remplacer Annuler par Fermer
+        try:
+            self._cancel_btn.clicked.disconnect()
+        except Exception:
+            pass
         self._cancel_btn.setText("Fermer")
-        self._cancel_btn.setObjectName("secondaryBtn")
         self._cancel_btn.setStyleSheet(
-            "QPushButton#secondaryBtn{font-size:12px;min-height:36px;border-radius:9px;}"
+            "background:rgba(255,255,255,0.08);color:#EBEBF5;"
+            "border:1px solid rgba(255,255,255,0.10);border-radius:9px;"
+            "font-size:12px;min-height:36px;padding:0 20px;"
         )
-        self._cancel_btn.clicked.disconnect()
         self._cancel_btn.clicked.connect(self.accept)
 
-        # Auto-fermeture après 2s
-        QTimer.singleShot(2000, self.accept)
+        # Auto-fermeture après 1.5s
+        QTimer.singleShot(1500, self.accept)
 
     @pyqtSlot(str)
     def _on_error(self, msg: str):

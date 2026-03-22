@@ -45,24 +45,32 @@ class InferenceWorker(QThread):
 class StreamWorker(QThread):
     """
     Lance une inférence LLM en streaming (token par token).
-    Chaque token est émis via le signal `token` pour mise à jour en temps réel.
+    Supporte l'annulation via cancel().
     """
 
-    token = pyqtSignal(str)
-    error = pyqtSignal(str)
+    token    = pyqtSignal(str)
+    error    = pyqtSignal(str)
     finished = pyqtSignal()
 
     def __init__(self, llm_node, packet):
         super().__init__()
-        self.llm_node = llm_node
-        self.packet = packet
+        self.llm_node  = llm_node
+        self.packet    = packet
+        self._cancelled = False
+
+    def cancel(self):
+        """Demande l'arrêt propre de la génération."""
+        self._cancelled = True
 
     def run(self):
         try:
             for tok in self.llm_node.stream_inference(self.packet):
+                if self._cancelled:
+                    break
                 self.token.emit(tok)
         except Exception as e:
-            self.error.emit(str(e))
+            if not self._cancelled:
+                self.error.emit(str(e))
         finally:
             self.finished.emit()
 

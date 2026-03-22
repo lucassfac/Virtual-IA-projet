@@ -1,30 +1,37 @@
 """
 main_window.py — Fenêtre principale Neural Forge.
-4 onglets : Chat, Bibliothèque, Entraînement, Paramètres
+Sidebar collapsible avec animation + auto-load du dernier modèle.
 """
 
+import os
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QPushButton, QStackedWidget, QStatusBar,
     QSizePolicy, QFrame, QScrollArea,
 )
-from PyQt6.QtCore import Qt, pyqtSlot, QSize
+from PyQt6.QtCore import (
+    Qt, pyqtSlot, QSize, QTimer,
+    QPropertyAnimation, QEasingCurve, QParallelAnimationGroup,
+)
 
 from core.nodes.llm_node import LLMNode
 from core.nodes.vision_node import VisionNode
+from core.session_manager import load_last_model, save_last_model
 
 from gui.tabs.chat_tab import ChatTab
 from gui.tabs.models_tab import ModelsTab
 from gui.tabs.training_tab import TrainingTab
 from gui.tabs.settings_tab import SettingsTab
-
+from gui.system_monitor import SystemMonitor
 
 _NAV = [
-    ("Chat",          "Discuter avec l'IA"),
-    ("Bibliothèque",  "Gérer les modèles"),
-    ("Entraînement",  "Spécialiser un modèle"),
-    ("Paramètres",    "Configurer l'application"),
+    ("Chat",         "Discuter avec l'IA"),
+    ("Bibliothèque", "Gérer les modèles"),
+    ("Entraînement", "Spécialiser un modèle"),
+    ("Paramètres",   "Configurer l'application"),
 ]
+
+SIDEBAR_W = 182
 
 
 class NavBtn(QPushButton):
@@ -51,42 +58,49 @@ class MainWindow(QMainWindow):
 
         self.llm_node    = LLMNode(name="LLM-Principal")
         self.vision_node = VisionNode(name="Vision-Principal")
+        self._sidebar_open = True
+        self._animating    = False
 
         self._build_ui()
         self._switch(0)
+        QTimer.singleShot(600, self._auto_load_last_model)
 
+    # ------------------------------------------------------------------
     def _build_ui(self):
         central = QWidget()
         central.setObjectName("contentArea")
         self.setCentralWidget(central)
 
-        main = QHBoxLayout(central)
-        main.setContentsMargins(0, 0, 0, 0)
-        main.setSpacing(0)
+        outer = QHBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        main.addWidget(self._make_sidebar())
+        # ── Sidebar ──
+        self._sidebar = self._make_sidebar()
+        outer.addWidget(self._sidebar)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet(
+        self._vsep = QFrame()
+        self._vsep.setFrameShape(QFrame.Shape.VLine)
+        self._vsep.setStyleSheet(
             "background:rgba(255,255,255,0.06);max-width:1px;border:none;"
         )
-        main.addWidget(sep)
+        outer.addWidget(self._vsep)
 
+        # ── Stack ──
         self.stack = QStackedWidget()
         self.stack.setObjectName("contentArea")
 
         self.chat_tab     = ChatTab(self.llm_node, self.vision_node)
         self.models_tab   = ModelsTab()
         self.training_tab = TrainingTab()
-        self.settings_tab = SettingsTab(self.llm_node)
+        self.settings_tab = SettingsTab(self.llm_node, self.vision_node)
 
-        self.stack.addWidget(self.chat_tab)                          # 0
-        self.stack.addWidget(self._scroll(self.models_tab))          # 1
-        self.stack.addWidget(self._scroll(self.training_tab))        # 2
-        self.stack.addWidget(self._scroll(self.settings_tab))        # 3
+        self.stack.addWidget(self.chat_tab)
+        self.stack.addWidget(self._scroll(self.models_tab))
+        self.stack.addWidget(self._scroll(self.training_tab))
+        self.stack.addWidget(self._scroll(self.settings_tab))
 
-        main.addWidget(self.stack, stretch=1)
+        outer.addWidget(self.stack, stretch=1)
 
         self.settings_tab.model_loaded.connect(self._on_model_loaded)
         self._build_statusbar()
@@ -94,29 +108,44 @@ class MainWindow(QMainWindow):
     def _make_sidebar(self) -> QWidget:
         sb = QWidget()
         sb.setObjectName("sidebar")
-        sb.setFixedWidth(180)
+        sb.setFixedWidth(SIDEBAR_W)
+        sb.setMinimumWidth(0)
 
         layout = QVBoxLayout(sb)
-        layout.setContentsMargins(10, 20, 10, 14)
+        layout.setContentsMargins(10, 16, 10, 14)
         layout.setSpacing(0)
 
+        # Logo + toggle
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(6, 0, 0, 0)
+        top_row.setSpacing(6)
+
+        name_col = QVBoxLayout()
+        name_col.setSpacing(1)
         name_lbl = QLabel("Neural Forge")
         name_lbl.setObjectName("appTitle")
-        name_lbl.setContentsMargins(6, 0, 0, 0)
-        layout.addWidget(name_lbl)
-
         sub_lbl = QLabel("EDGE AI STUDIO")
         sub_lbl.setObjectName("appSubtitle")
-        sub_lbl.setContentsMargins(6, 2, 0, 0)
-        layout.addWidget(sub_lbl)
+        name_col.addWidget(name_lbl)
+        name_col.addWidget(sub_lbl)
+        top_row.addLayout(name_col)
+        top_row.addStretch()
 
-        layout.addSpacing(18)
+        toggle = QPushButton("☰")
+        toggle.setFixedSize(32, 32)
+        toggle.setStyleSheet(
+            "background:rgba(255,255,255,0.06);color:#636366;"
+            "border:none;border-radius:8px;font-size:15px;"
+        )
+        toggle.setToolTip("Masquer le menu  (cliquez ☰ pour rouvrir)")
+        toggle.clicked.connect(self._close_sidebar)
+        top_row.addWidget(toggle)
+        layout.addLayout(top_row)
+        layout.addSpacing(16)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(
-            "background:rgba(255,255,255,0.07);max-height:1px;border:none;"
-        )
+        sep.setStyleSheet("background:rgba(255,255,255,0.07);max-height:1px;border:none;")
         layout.addWidget(sep)
         layout.addSpacing(10)
 
@@ -130,12 +159,89 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
+        self._sidebar_model_lbl = QLabel("Aucun modèle")
+        self._sidebar_model_lbl.setStyleSheet(
+            "color:#3A3A3C;font-size:10px;background:transparent;padding:0 4px;"
+        )
+        self._sidebar_model_lbl.setWordWrap(True)
+        layout.addWidget(self._sidebar_model_lbl)
+        layout.addSpacing(4)
+
         ver = QLabel("v0.1.0 — alpha")
         ver.setObjectName("versionLabel")
         ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(ver)
 
         return sb
+
+    # ── Animation sidebar ──────────────────────────────────────────────
+
+    def _close_sidebar(self):
+        if self._animating: return
+        self._animating = True
+
+        anim = QPropertyAnimation(self._sidebar, b"maximumWidth")
+        anim.setDuration(220)
+        anim.setStartValue(SIDEBAR_W)
+        anim.setEndValue(0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        anim2 = QPropertyAnimation(self._vsep, b"maximumWidth")
+        anim2.setDuration(220)
+        anim2.setStartValue(1)
+        anim2.setEndValue(0)
+        anim2.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        grp = QParallelAnimationGroup(self)
+        grp.addAnimation(anim)
+        grp.addAnimation(anim2)
+        grp.finished.connect(self._on_sidebar_closed)
+        grp.start()
+        self._anim_grp = grp
+
+    def _on_sidebar_closed(self):
+        self._sidebar.setFixedWidth(0)
+        self._vsep.setMaximumWidth(0)
+        self._sidebar_open = False
+        self._animating = False
+        # Bouton flottant dans le header du chat (pas par-dessus tout)
+        self._open_btn = QPushButton("☰")
+        self._open_btn.setParent(self.stack)
+        self._open_btn.setFixedSize(30, 30)
+        self._open_btn.setStyleSheet(
+            "background:rgba(255,255,255,0.08);color:#8E8E93;"
+            "border:none;border-radius:8px;font-size:14px;"
+        )
+        self._open_btn.move(6, 10)
+        self._open_btn.show()
+        self._open_btn.raise_()
+        self._open_btn.clicked.connect(self._open_sidebar)
+
+    def _open_sidebar(self):
+        if self._animating: return
+        self._animating = True
+        if hasattr(self, "_open_btn"):
+            self._open_btn.hide()
+            self._open_btn.deleteLater()
+
+        self._sidebar.setFixedWidth(0)
+        self._sidebar.setMaximumWidth(SIDEBAR_W)
+        self._vsep.setMaximumWidth(1)
+
+        anim = QPropertyAnimation(self._sidebar, b"maximumWidth")
+        anim.setDuration(220)
+        anim.setStartValue(0)
+        anim.setEndValue(SIDEBAR_W)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.finished.connect(lambda: (
+            self._sidebar.setFixedWidth(SIDEBAR_W),
+            setattr(self, "_sidebar_open", True),
+            setattr(self, "_animating", False),
+        ))
+        anim.start()
+        self._anim_open = anim
+
+    # ── Scroll wrapper ─────────────────────────────────────────────────
 
     @staticmethod
     def _scroll(widget: QWidget) -> QScrollArea:
@@ -150,39 +256,96 @@ class MainWindow(QMainWindow):
         area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         return area
 
+    # ── Status bar ────────────────────────────────────────────────────
+
     def _build_statusbar(self):
         sb = QStatusBar()
         self.setStatusBar(sb)
+
         self._sb_dot = QLabel()
         self._sb_dot.setFixedSize(8, 8)
         self._sb_dot_color("#3A3A3C")
         sb.addWidget(self._sb_dot)
         sb.addWidget(QLabel(" "))
+
         self._sb_lbl = QLabel("Aucun modèle chargé")
         sb.addWidget(self._sb_lbl)
-        sb.addPermanentWidget(QLabel("Neural Forge  ·  Edge AI  ·  100% local"))
+
+        sep1 = QLabel("  ·  ")
+        sep1.setStyleSheet("color:#3A3A3C;")
+        sb.addPermanentWidget(sep1)
+
+        self._cpu_lbl = QLabel("CPU —%")
+        self._cpu_lbl.setStyleSheet("color:#48484A;font-size:11px;min-width:58px;")
+        sb.addPermanentWidget(self._cpu_lbl)
+
+        self._ram_lbl = QLabel("RAM —%")
+        self._ram_lbl.setStyleSheet("color:#48484A;font-size:11px;min-width:110px;margin-left:8px;")
+        sb.addPermanentWidget(self._ram_lbl)
+
+        self._gpu_lbl = QLabel("")
+        self._gpu_lbl.setStyleSheet("color:#48484A;font-size:11px;margin-left:8px;")
+        sb.addPermanentWidget(self._gpu_lbl)
+
+        sep2 = QLabel("  ·  ")
+        sep2.setStyleSheet("color:#3A3A3C;")
+        sb.addPermanentWidget(sep2)
+        sb.addPermanentWidget(QLabel("100% local"))
+
+        self._monitor = SystemMonitor(self)
+        self._monitor.stats_updated.connect(self._on_stats)
+        self._monitor.start()
+
+    # ── Navigation ────────────────────────────────────────────────────
 
     def _switch(self, idx: int):
         self.stack.setCurrentIndex(idx)
         for i, btn in enumerate(self._nav_btns):
             btn.set_active(i == idx)
-        # Refresh liste installés à chaque visite de la bibliothèque
         if idx == 1:
-            # Forcer une relecture du dossier models/ à chaque visite
-            from core.model_manager import get_models_dir, list_local_models
-            get_models_dir()  # crée le dossier si absent
+            from core.model_manager import get_models_dir
+            get_models_dir()
             self.models_tab.refresh_installed()
+
+    # ── Auto-load ─────────────────────────────────────────────────────
+
+    def _auto_load_last_model(self):
+        model_path, lora_path = load_last_model()
+        if not model_path or not os.path.exists(model_path):
+            return
+        self.settings_tab.model_picker.set_path(model_path)
+        if lora_path and os.path.exists(lora_path):
+            self.settings_tab.lora_picker.set_path(lora_path)
+        self.settings_tab._load()
+        name = os.path.basename(model_path)
+        lora = f" + {os.path.basename(lora_path)}" if lora_path else ""
+        self._sb_lbl.setText(f"Chargement auto : {name}{lora}…")
+
+    # ── Slots ─────────────────────────────────────────────────────────
 
     @pyqtSlot(str, str)
     def _on_model_loaded(self, model_path: str, lora_path: str):
-        import os
         name = os.path.basename(model_path)
         lora = f" + {os.path.basename(lora_path)}" if lora_path else ""
         self._sb_dot_color("#30D158")
         self._sb_lbl.setText(f"{name}{lora}")
+        self._sidebar_model_lbl.setText(f"● {name}")
+        self._sidebar_model_lbl.setStyleSheet(
+            "color:#30D158;font-size:10px;background:transparent;padding:0 4px;"
+        )
         self.chat_tab.on_model_loaded(model_path, lora_path)
-        # Refresh bibliothèque pour marquer le modèle actif
         self.models_tab.refresh_installed()
+        save_last_model(model_path, lora_path)
+
+    @pyqtSlot(float, float, float, float, str)
+    def _on_stats(self, cpu: float, ram: float, ram_used: float, ram_total: float, gpu: str):
+        cpu_c = "#30D158" if cpu < 50 else "#FF9F0A" if cpu < 80 else "#FF453A"
+        self._cpu_lbl.setText(f"CPU {cpu:.0f}%")
+        self._cpu_lbl.setStyleSheet(f"color:{cpu_c};font-size:11px;min-width:58px;")
+        ram_c = "#30D158" if ram < 60 else "#FF9F0A" if ram < 85 else "#FF453A"
+        self._ram_lbl.setText(f"RAM {ram:.0f}%  {ram_used:.1f}/{ram_total:.0f}Go")
+        self._ram_lbl.setStyleSheet(f"color:{ram_c};font-size:11px;min-width:110px;margin-left:8px;")
+        self._gpu_lbl.setText(f"  ·  {gpu}" if gpu else "")
 
     def _sb_dot_color(self, c: str):
         self._sb_dot.setStyleSheet(

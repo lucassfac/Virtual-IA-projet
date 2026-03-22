@@ -262,22 +262,57 @@ def download_model(
     """
     os.makedirs(dest_dir, exist_ok=True)
     dest_path = os.path.join(dest_dir, filename)
-
-    # Reprise si fichier partiel existant
-    downloaded = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
-
+    local_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
     url = HF_CDN.format(repo_id=repo_id, filename=filename)
 
     try:
+        # ── Étape 1 : HEAD pour connaître la taille exacte ──
+        head_req = urllib.request.Request(
+            url, method="HEAD", headers=_auth_headers(token)
+        )
+        try:
+            with urllib.request.urlopen(head_req, timeout=10) as hr:
+                remote_size = int(hr.headers.get("Content-Length", 0))
+        except Exception:
+            remote_size = 0
+
+        # ── Étape 2 : Fichier déjà complet ? ──
+        if remote_size > 0 and local_size >= remote_size:
+            if progress_cb:
+                progress_cb(remote_size, remote_size)
+            return os.path.abspath(dest_path)
+
+        # ── Étape 3 : Téléchargement (ou reprise) ──
         req = urllib.request.Request(url, headers=_auth_headers(token))
-        if downloaded > 0:
-            req.add_header("Range", f"bytes={downloaded}-")
+        # Reprise seulement si on connaît la taille totale
+        if local_size > 0 and remote_size > 0:
+            req.add_header("Range", f"bytes={local_size}-")
 
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            total = int(resp.headers.get("Content-Length", 0)) + downloaded
-            chunk = 65536  # 64 Ko
+        bytes_done = local_size   # point de départ pour la progression
 
-            with open(dest_path, "ab" if downloaded else "wb") as f:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            status = getattr(resp, "status", 200)
+
+            # 416 = déjà complet selon le serveur
+            if status == 416:
+                if progress_cb and remote_size > 0:
+                    progress_cb(remote_size, remote_size)
+                return os.path.abspath(dest_path)
+
+            content_length = int(resp.headers.get("Content-Length", 0) or 0)
+
+            # Taille totale = octets déjà présents + octets restants
+            if remote_size > 0:
+                total = remote_size
+            elif content_length > 0:
+                total = local_size + content_length
+            else:
+                total = 0
+
+            chunk = 65536
+            mode = "ab" if local_size > 0 else "wb"
+
+            with open(dest_path, mode) as f:
                 while True:
                     if cancel_flag and cancel_flag[0]:
                         raise DownloadError("Téléchargement annulé.")
@@ -285,9 +320,10 @@ def download_model(
                     if not data:
                         break
                     f.write(data)
-                    downloaded += len(data)
+                    bytes_done += len(data)
                     if progress_cb and total > 0:
-                        progress_cb(downloaded, total)
+                        # Toujours entre 0 et total
+                        progress_cb(min(bytes_done, total), total)
 
     except DownloadError:
         raise

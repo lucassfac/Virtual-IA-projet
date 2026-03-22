@@ -65,10 +65,21 @@ class LLMNode(BaseNode):
         )
 
         try:
+            import os as _os
+            # Max 4 threads : au-delà le gain est marginal
+            # et le CPU sature à 99% avec des modèles 4B+
+            n_cpu = _os.cpu_count() or 4
+            n_threads = min(n_cpu, 4)
             self.llm_engine = Llama(
                 model_path=model_path,
                 lora_path=effective_lora,
                 n_ctx=2048,
+                n_threads=n_threads,
+                n_threads_batch=n_threads,
+                n_batch=256,
+                n_gpu_layers=-1,
+                use_mmap=True,
+                use_mlock=False,
                 verbose=False,
             )
             self.current_model_path = model_path
@@ -90,7 +101,12 @@ class LLMNode(BaseNode):
         forge_logger.log_node_event(self.name, "INFERENCE_START", f"len={len(prompt)}")
 
         output = self.llm_engine(
-            full_prompt, max_tokens=200, stop=["Question:"], echo=False,
+            full_prompt,
+            max_tokens=2048,
+            stop=["Question:"],
+            echo=False,
+            temperature=0.7,
+            repeat_penalty=1.1,
         )
         response_text: str = output["choices"][0]["text"].strip()
         finish_reason: str = output["choices"][0].get("finish_reason", "unknown")
@@ -122,7 +138,13 @@ class LLMNode(BaseNode):
         forge_logger.log_node_event(self.name, "STREAM_START")
 
         stream = self.llm_engine(
-            full_prompt, max_tokens=200, stop=["Question:"], echo=False, stream=True,
+            full_prompt,
+            max_tokens=2048,
+            stop=["Question:"],
+            echo=False,
+            stream=True,
+            temperature=0.7,
+            repeat_penalty=1.1,
         )
         for chunk in stream:
             token: str = chunk["choices"][0]["text"]

@@ -106,15 +106,27 @@ class FilePickerRow(QWidget):
         layout.addWidget(self._path_lbl)
 
         # ── Bouton Parcourir ──
-        # Le bouton est purement décoratif visuellement — le clic est géré
-        # sur le widget entier via mousePressEvent, ce qui évite le double appel.
         self._btn = QPushButton("Parcourir")
         self._btn.setObjectName("filePickBtn")
-        # On désactive les événements de clic sur le bouton lui-même
-        # pour laisser mousePressEvent du widget parent gérer l'action.
         self._btn.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         layout.addWidget(self._btn)
+
+        # ── Bouton poubelle (visible seulement quand fichier sélectionné) ──
+        self._clear_btn = QPushButton("🗑")
+        self._clear_btn.setFixedSize(46, 46)
+        self._clear_btn.setStyleSheet(
+            "background:rgba(255,69,58,0.12);color:#FF453A;"
+            "border:none;border-radius:0px;"
+            "border-top-right-radius:10px;border-bottom-right-radius:10px;"
+            "font-size:14px;"
+        )
+        self._clear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._clear_btn.setToolTip("Effacer le chemin")
+        self._clear_btn.hide()
+        # Ce bouton gère son propre clic — pas transparent
+        self._clear_btn.clicked.connect(self._on_clear_clicked)
+        layout.addWidget(self._clear_btn)
 
     # ------------------------------------------------------------------
     # Événements souris (hover + clic)
@@ -156,21 +168,31 @@ class FilePickerRow(QWidget):
     # API publique
     # ------------------------------------------------------------------
 
+    def _on_clear_clicked(self):
+        """Clic sur la poubelle — efface sans ouvrir le dialog."""
+        self.clear()
+
     def set_path(self, path: str):
         self._path = path
-        # Affichage : dossier_parent/nom_fichier
         parent = os.path.basename(os.path.dirname(path))
         name = os.path.basename(path)
         display = f"{parent}/{name}" if parent else name
         self._path_lbl.setText(display)
         self._path_lbl.setStyleSheet(
-            "color: #AEAEB2; font-size: 13px;"
-            " font-style: normal; background: transparent; border: none;"
+            "color:#AEAEB2;font-size:13px;"
+            "font-style:normal;background:transparent;border:none;"
         )
         self._icon_lbl.setStyleSheet(
-            "color: #0A84FF; font-size: 16px;"
-            " background: transparent; border: none;"
+            "color:#0A84FF;font-size:16px;"
+            "background:transparent;border:none;"
         )
+        # Ajuster le rayon du bouton Parcourir pour faire place à la poubelle
+        self._btn.setStyleSheet(
+            "QPushButton#filePickBtn{"
+            "border-top-right-radius:0px;border-bottom-right-radius:0px;"
+            "border-right:1px solid rgba(255,255,255,0.05);}"
+        )
+        self._clear_btn.show()
         self.setToolTip(path)
 
     def get_path(self) -> str:
@@ -180,11 +202,13 @@ class FilePickerRow(QWidget):
         self._path = ""
         self._path_lbl.setText(self._placeholder)
         self._path_lbl.setStyleSheet(
-            "color: #48484A; font-size: 13px;"
-            " font-style: italic; background: transparent; border: none;"
+            "color:#48484A;font-size:13px;"
+            "font-style:italic;background:transparent;border:none;"
         )
         self._icon_lbl.setStyleSheet(
-            "color: #48484A; font-size: 16px;"
-            " background: transparent; border: none;"
+            "color:#48484A;font-size:16px;"
+            "background:transparent;border:none;"
         )
+        self._clear_btn.hide()
+        self._btn.setStyleSheet("")  # reset radius
         self.setToolTip("")
