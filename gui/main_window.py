@@ -23,6 +23,7 @@ from gui.tabs.models_tab import ModelsTab
 from gui.tabs.training_tab import TrainingTab
 from gui.tabs.settings_tab import SettingsTab
 from gui.system_monitor import SystemMonitor
+from core.utils.hardware import get_profile
 
 _NAV = [
     ("Chat",         "Discuter avec l'IA"),
@@ -291,6 +292,28 @@ class MainWindow(QMainWindow):
         sep2.setStyleSheet("color:#3A3A3C;")
         sb.addPermanentWidget(sep2)
         sb.addPermanentWidget(QLabel("100% local"))
+
+        # Badge performance
+        sep3 = QLabel("  ·  ")
+        sep3.setStyleSheet("color:#2C2C2E;")
+        sb.addPermanentWidget(sep3)
+
+        hw = get_profile()
+        self._perf_badge = QLabel(hw.badge_text)
+        self._perf_badge.setStyleSheet(
+            f"color:{hw.badge_color};font-size:10px;"
+            "font-weight:600;letter-spacing:0.5px;"
+        )
+        self._perf_badge.setToolTip(
+            f"RAM : {hw.ram_total_gb} Go  ·  "
+            f"CPU : {hw.cpu_cores_phys} cœurs  ·  "
+            f"GPU : {hw.gpu.name}\n"
+            f"n_threads={hw.n_threads}  n_ctx={hw.n_ctx}  "
+            f"n_batch={hw.n_batch}  "
+            f"flash_attn={'oui' if hw.flash_attn else 'non'}\n"
+            f"CUDA : {'oui ✓' if hw.gpu.cuda_ok else 'non — recompiler llama-cpp'}"
+        )
+        sb.addPermanentWidget(self._perf_badge)
 
         self._monitor = SystemMonitor(self)
         self._monitor.stats_updated.connect(self._on_stats)

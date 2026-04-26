@@ -6,12 +6,13 @@ Inclut la gestion du token HuggingFace pour les modèles protégés (Gemma, LLaM
 import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QSpinBox, QLineEdit, QFrame,
+    QPushButton, QSpinBox, QLineEdit, QFrame, QButtonGroup, QRadioButton,
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 from gui.workers import ModelLoadWorker
 from gui.widgets import FilePickerRow
 from core.model_manager import save_hf_token, load_hf_token, clear_hf_token
+from core.utils.hardware_check import get_hw
 
 
 
@@ -176,6 +177,80 @@ class SettingsTab(QWidget):
         root.addWidget(model_card)
         root.addSpacing(20)
 
+        # ── Card : Mode d'inférence ──
+        root.addWidget(self._section("MODE D'INFÉRENCE"))
+        root.addSpacing(10)
+
+        mode_card = self._card()
+        ml = QVBoxLayout(mode_card)
+        ml.setContentsMargins(20, 18, 20, 18)
+        ml.setSpacing(12)
+
+        hw = get_hw()
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(16)
+
+        self._mode_group = QButtonGroup(self)
+
+        self._radio_standard = QRadioButton("  Standard")
+        self._radio_standard.setChecked(True)
+        self._radio_standard.setStyleSheet(
+            "QRadioButton{color:#F2F2F7;font-size:13px;background:transparent;}"
+            "QRadioButton::indicator{width:16px;height:16px;}"
+            "QRadioButton::indicator:checked{background:#0A84FF;border-radius:8px;border:2px solid #0A84FF;}"
+            "QRadioButton::indicator:unchecked{background:transparent;border-radius:8px;border:2px solid #3A3A3C;}"
+        )
+        self._mode_group.addButton(self._radio_standard, 0)
+        mode_row.addWidget(self._radio_standard)
+
+        self._radio_turbo = QRadioButton("  Turbo  ⚡")
+        self._radio_turbo.setEnabled(hw.turbo_eligible)
+        self._radio_turbo.setToolTip(hw.turbo_reason)
+        turbo_color = "#F2F2F7" if hw.turbo_eligible else "#3A3A3C"
+        self._radio_turbo.setStyleSheet(
+            f"QRadioButton{{color:{turbo_color};font-size:13px;background:transparent;}}"
+            "QRadioButton::indicator{width:16px;height:16px;}"
+            "QRadioButton::indicator:checked{background:#FF9F0A;border-radius:8px;border:2px solid #FF9F0A;}"
+            "QRadioButton::indicator:unchecked{background:transparent;border-radius:8px;border:2px solid #3A3A3C;}"
+        )
+        self._mode_group.addButton(self._radio_turbo, 1)
+        mode_row.addWidget(self._radio_turbo)
+        mode_row.addStretch()
+
+        ml.addLayout(mode_row)
+
+        # Info RAM
+        ram_color = "#30D158" if hw.turbo_eligible else "#FF9F0A"
+        hw_info = QLabel(
+            f"RAM : {hw.ram_total_gb} Go  ·  "
+            f"GPU : {hw.gpu_name}  ({hw.gpu_vram_gb} Go VRAM)  ·  "
+            f"CPU : {hw.cpu_cores_phys} cœurs physiques"
+        )
+        hw_info.setStyleSheet(f"color:{ram_color};font-size:11px;background:transparent;")
+        ml.addWidget(hw_info)
+
+        # Draft model (visible uniquement si Turbo possible)
+        if hw.turbo_eligible:
+            ml.addWidget(self._lbl("Modèle draft pour Turbo  (.gguf — modèle plus petit)"))
+            self.draft_picker = FilePickerRow(
+                placeholder="Ex : tinyllama.gguf, gemma-3-1b.gguf…",
+                icon="⚡",
+                filters="Modèles GGUF (*.gguf);;Tous (*)",
+                dialog_title="Choisir un modèle draft (petit)",
+                start_dir="models/",
+            )
+            ml.addWidget(self.draft_picker)
+        else:
+            self.draft_picker = None
+            locked_lbl = QLabel(
+                f"Turbo verrouillé — {12 - hw.ram_total_gb:.1f} Go RAM supplémentaires requis."
+            )
+            locked_lbl.setStyleSheet("color:#3A3A3C;font-size:11px;background:transparent;")
+            ml.addWidget(locked_lbl)
+
+        root.addWidget(mode_card)
+        root.addSpacing(20)
+
         # ── Card : Vision (LLaVA) ──
         root.addWidget(self._section("VISION  (MULTIMODAL)"))
         root.addSpacing(10)
@@ -330,14 +405,43 @@ class SettingsTab(QWidget):
             self._dot_color("#FF453A")
             self._st_text.setText("Sélectionnez un fichier modèle")
             return
-        lora_path = self.lora_picker.get_path() or None
+        lora_path  = self.lora_picker.get_path() or None
+        turbo      = self._radio_turbo.isChecked()
+        draft_path = (self.draft_picker.get_path() or None) if self.draft_picker else None
+
         self.load_btn.setEnabled(False)
-        self.load_btn.setText("  Chargement…")
+        mode_label = "TURBO ⚡" if turbo else "Standard"
+        self.load_btn.setText(f"  Chargement {mode_label}…")
         self._dot_color("#FF9F0A")
-        self._st_text.setText("Chargement en cours…")
+        self._st_text.setText(f"Chargement {mode_label}…")
         self._st_detail.hide()
 
-        self._worker = ModelLoadWorker(self.llm_node, model_path, lora_path)
+        from PyQt6.QtCore import QThread
+        from PyQt6.QtCore import pyqtSignal as pS
+
+        class TurboLoadWorker(QThread):
+            success  = pS(str)
+            error    = pS(str)
+            finished = pS()
+            def __init__(self_, node, mp, lp, dp, t):
+                super().__init__()
+                self_.node=node; self_.mp=mp; self_.lp=lp
+                self_.dp=dp; self_.t=t
+            def run(self_):
+                try:
+                    self_.node.load_model(
+                        self_.mp, lora_path=self_.lp,
+                        draft_model_path=self_.dp, turbo=self_.t
+                    )
+                    self_.success.emit(self_.mp)
+                except Exception as e:
+                    self_.error.emit(str(e))
+                finally:
+                    self_.finished.emit()
+
+        self._worker = TurboLoadWorker(
+            self.llm_node, model_path, lora_path, draft_path, turbo
+        )
         self._worker.success.connect(self._ok)
         self._worker.error.connect(self._err)
         self._worker.finished.connect(lambda: (

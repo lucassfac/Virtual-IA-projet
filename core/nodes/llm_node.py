@@ -1,14 +1,15 @@
 """
-llm_node.py — Nœud d'inférence texte via llama-cpp-python.
+llm_node.py — Moteur d'inférence haute performance Neural Forge.
+Paramètres auto-détectés depuis hardware.py à chaque load_model().
 """
 
-import json
 import os
 from typing import Generator, Optional
 
 from core.logger import forge_logger
 from core.node import AIModelMissingError, BaseNode, ModelLoadError
 from core.types import DataPacket, DataType
+from core.utils.hardware import get_profile, HardwareProfile
 
 try:
     from llama_cpp import Llama
@@ -17,14 +18,20 @@ except ImportError:
 
 
 class LLMNode(BaseNode):
+
     ACCEPTED_TYPES = (DataType.TEXT,)
 
     def __init__(self, name: str = "LLM Generator"):
         super().__init__(name)
-        self.llm_engine: Optional[object] = None
-        self.current_model_path: Optional[str] = None
-        self.current_lora_path: Optional[str] = None
-        self._lora_is_simulated: bool = False
+        self.llm_engine:         Optional[object]          = None
+        self.draft_engine:       Optional[object]          = None
+        self.current_model_path: Optional[str]             = None
+        self.current_lora_path:  Optional[str]             = None
+        self._lora_is_simulated: bool                      = False
+        self._turbo_active:      bool                      = False
+        self.hw:                 Optional[HardwareProfile] = None
+
+    # ── LoRA validation ───────────────────────────────────────────────
 
     @staticmethod
     def _is_real_lora(path: str) -> bool:
@@ -33,112 +40,168 @@ class LLMNode(BaseNode):
         try:
             with open(path, "rb") as f:
                 magic = f.read(4)
-            if magic == b"GGUF":
-                return True
-            if magic[:1] == b"{":
-                return False
-            return True
+            return magic == b"GGUF" or magic[:3] == b"ggm"
         except OSError:
             return False
 
-    def load_model(self, model_path: str, lora_path: Optional[str] = None) -> None:
+    # ── Chargement ────────────────────────────────────────────────────
+
+    def load_model(
+        self,
+        model_path:       str,
+        lora_path:        Optional[str] = None,
+        draft_model_path: Optional[str] = None,
+        turbo:            bool          = False,
+    ) -> None:
         if Llama is None:
             raise ModelLoadError("llama-cpp-python n'est pas installé.")
 
+        self.hw = get_profile()
+
+        # ── LoRA ──
         effective_lora = None
         self._lora_is_simulated = False
-
         if lora_path:
             if self._is_real_lora(lora_path):
                 effective_lora = lora_path
-                forge_logger.log_node_event(self.name, "LORA_REAL", lora_path)
             else:
-                # Adaptateur simulé → on charge sans LoRA, on logue discrètement
                 self._lora_is_simulated = True
                 forge_logger.warning(
-                    f"[{self.name}] LoRA simulé ignoré : '{os.path.basename(lora_path)}'"
+                    f"[{self.name}] LoRA simulé ignoré : "
+                    f"'{os.path.basename(lora_path)}'"
                 )
 
+        # ── Turbo gate ──
+        self._turbo_active = False
+        if turbo:
+            if not self.hw.turbo_eligible:
+                forge_logger.warning(
+                    f"[{self.name}] Turbo refusé — RAM {self.hw.ram_total_gb} Go < 12 Go."
+                )
+            elif not draft_model_path or not os.path.exists(draft_model_path):
+                forge_logger.warning(
+                    f"[{self.name}] Turbo refusé — pas de modèle draft."
+                )
+            else:
+                self._turbo_active = True
+
+        mode = "TURBO" if self._turbo_active else "STANDARD"
         forge_logger.log_node_event(
             self.name, "LOAD_MODEL",
-            f"model={model_path}, lora={effective_lora}"
+            f"[{mode}] {os.path.basename(model_path)}  "
+            f"threads={self.hw.n_threads}  ctx={self.hw.n_ctx}  "
+            f"gpu={self.hw.n_gpu_layers}  batch={self.hw.n_batch}  "
+            f"flash={self.hw.flash_attn}"
         )
 
+        # ── Moteur principal ──
         try:
-            import os as _os
-            # Max 4 threads : au-delà le gain est marginal
-            # et le CPU sature à 99% avec des modèles 4B+
-            n_cpu = _os.cpu_count() or 4
-            n_threads = min(n_cpu, 4)
-            self.llm_engine = Llama(
-                model_path=model_path,
-                lora_path=effective_lora,
-                n_ctx=2048,
-                n_threads=n_threads,
-                n_threads_batch=n_threads,
-                n_batch=256,
-                n_gpu_layers=-1,
-                use_mmap=True,
-                use_mlock=False,
-                verbose=False,
+            kwargs = dict(
+                model_path    = model_path,
+                lora_path     = effective_lora,
+                n_ctx         = self.hw.n_ctx,
+                n_threads     = self.hw.n_threads,
+                n_threads_batch = self.hw.n_threads,
+                n_batch       = self.hw.n_batch,
+                n_gpu_layers  = self.hw.n_gpu_layers,
+                use_mmap      = self.hw.use_mmap,
+                use_mlock     = False,
+                verbose       = False,
             )
-            self.current_model_path = model_path
-            self.current_lora_path = lora_path
+            # Paramètres optionnels selon version llama-cpp
+            if self.hw.flash_attn:
+                kwargs["flash_attn"] = True
+            try:
+                kwargs["n_ubatch"] = self.hw.n_ubatch
+            except Exception:
+                pass
 
-            if effective_lora:
-                forge_logger.log_node_event(self.name, "LORA_APPLIED", effective_lora)
+            self.llm_engine = Llama(**kwargs)
 
-            super().load_model(model_path)
-
+        except TypeError as e:
+            # Vieille API — retire les kwargs inconnus
+            for k in ("flash_attn", "n_ubatch"):
+                kwargs.pop(k, None)
+            self.llm_engine = Llama(**kwargs)
         except FileNotFoundError:
-            raise ModelLoadError(f"[{self.name}] Modèle introuvable : '{model_path}'")
+            raise ModelLoadError(
+                f"[{self.name}] Introuvable : '{model_path}'"
+            )
         except Exception as e:
-            raise ModelLoadError(f"[{self.name}] Échec du chargement : {e}")
+            raise ModelLoadError(f"[{self.name}] Chargement échoué : {e}")
+
+        # ── Modèle draft (Turbo) ──
+        self.draft_engine = None
+        if self._turbo_active:
+            try:
+                self.draft_engine = Llama(
+                    model_path   = draft_model_path,
+                    n_ctx        = self.hw.n_ctx,
+                    n_threads    = self.hw.n_threads,
+                    n_gpu_layers = self.hw.n_gpu_layers,
+                    use_mmap     = True,
+                    verbose      = False,
+                )
+                forge_logger.log_node_event(
+                    self.name, "TURBO_DRAFT_OK",
+                    os.path.basename(draft_model_path)
+                )
+            except Exception as e:
+                forge_logger.warning(
+                    f"[{self.name}] Draft échoué ({e}) — retour Standard."
+                )
+                self._turbo_active = False
+                self.draft_engine  = None
+
+        self.current_model_path = model_path
+        self.current_lora_path  = lora_path
+        super().load_model(model_path)
+        forge_logger.log_node_event(
+            self.name, "READY",
+            f"[{'TURBO' if self._turbo_active else 'STANDARD'}] "
+            f"{os.path.basename(model_path)}"
+        )
+
+    # ── Inférence bloquante ───────────────────────────────────────────
 
     def _run_inference(self) -> DataPacket:
         prompt = self.input_packet.content
-        full_prompt = f"Question: {prompt}\nRéponse:"
-        forge_logger.log_node_event(self.name, "INFERENCE_START", f"len={len(prompt)}")
-
         output = self.llm_engine(
-            full_prompt,
+            f"Question: {prompt}\nRéponse:",
             max_tokens=2048,
             stop=["Question:"],
             echo=False,
             temperature=0.7,
             repeat_penalty=1.1,
         )
-        response_text: str = output["choices"][0]["text"].strip()
-        finish_reason: str = output["choices"][0].get("finish_reason", "unknown")
-
-        if not response_text:
-            response_text = "(Réponse vide — essayez de reformuler le prompt)"
-
-        forge_logger.log_node_event(self.name, "INFERENCE_END",
-                                    f"len={len(response_text)}, finish={finish_reason}")
-
+        text: str   = output["choices"][0]["text"].strip() or "(Réponse vide)"
+        finish: str = output["choices"][0].get("finish_reason", "unknown")
         return DataPacket(
-            DataType.TEXT, response_text,
+            DataType.TEXT, text,
             metadata={
-                "model": self.current_model_path,
-                "lora": self.current_lora_path,
-                "lora_applied": not self._lora_is_simulated,
-                "finish_reason": finish_reason,
+                "model":         self.current_model_path,
+                "lora":          self.current_lora_path,
+                "lora_applied":  not self._lora_is_simulated,
+                "turbo":         self._turbo_active,
+                "finish_reason": finish,
             },
             source=self.name,
         )
+
+    # ── Streaming ─────────────────────────────────────────────────────
 
     def stream_inference(self, packet: DataPacket) -> Generator[str, None, None]:
         self.set_input(packet)
         if not self.model_loaded:
             raise AIModelMissingError(f"[{self.name}] Aucun modèle chargé.")
 
-        prompt = self.input_packet.content
-        full_prompt = f"Question: {prompt}\nRéponse:"
-        forge_logger.log_node_event(self.name, "STREAM_START")
+        forge_logger.log_node_event(
+            self.name, "STREAM_START",
+            f"{'TURBO' if self._turbo_active else 'STANDARD'}"
+        )
 
         stream = self.llm_engine(
-            full_prompt,
+            f"Question: {self.input_packet.content}\nRéponse:",
             max_tokens=2048,
             stop=["Question:"],
             echo=False,
@@ -147,8 +210,27 @@ class LLMNode(BaseNode):
             repeat_penalty=1.1,
         )
         for chunk in stream:
-            token: str = chunk["choices"][0]["text"]
-            if token:
-                yield token
+            tok: str = chunk["choices"][0]["text"]
+            if tok:
+                yield tok
 
         forge_logger.log_node_event(self.name, "STREAM_END")
+
+    # ── Statut ────────────────────────────────────────────────────────
+
+    def get_status(self) -> dict:
+        base = super().get_status()
+        if self.hw:
+            base.update({
+                "turbo_active":   self._turbo_active,
+                "turbo_eligible": self.hw.turbo_eligible,
+                "ram_total_gb":   self.hw.ram_total_gb,
+                "gpu":            self.hw.gpu.name,
+                "gpu_vram_gb":    self.hw.gpu.vram_gb,
+                "cuda_ok":        self.hw.gpu.cuda_ok,
+                "n_threads":      self.hw.n_threads,
+                "n_ctx":          self.hw.n_ctx,
+                "flash_attn":     self.hw.flash_attn,
+                "draft_loaded":   self.draft_engine is not None,
+            })
+        return base

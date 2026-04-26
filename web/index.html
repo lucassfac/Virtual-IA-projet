@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Neural Forge</title>
+
+<!-- Tailwind CDN -->
+<script src="https://cdn.tailwindcss.com"></script>
+
+<!-- DM Sans + DM Mono — lisibles, modernes, distincts d'Inter -->
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: { sans: ['DM Sans', 'sans-serif'], mono: ['DM Mono', 'monospace'] },
+        colors: {
+          zinc: { 950: '#09090b', 925: '#0f0f12' },
+          accent: '#3b82f6',
+          'accent-dim': '#1d4ed8',
+          'turbo': '#f59e0b',
+        }
+      }
+    }
+  }
+</script>
+
+<style>
+  /* ── Base ── */
+  *, *::before, *::after { box-sizing: border-box; }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: #09090b;
+    color: #e4e4e7;
+    overflow: hidden;
+    height: 100vh;
+    -webkit-app-region: drag; /* draggable titlebar area */
+  }
+
+  /* ── Scrollbar macOS ── */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 99px; }
+  ::-webkit-scrollbar-thumb:hover { background: #52525b; }
+
+  /* ── Sidebar glassmorphism ── */
+  #sidebar {
+    background: rgba(15, 15, 18, 0.85);
+    backdrop-filter: blur(24px) saturate(160%);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+    border-right: 1px solid rgba(255,255,255,0.06);
+  }
+
+  /* ── Nav buttons ── */
+  .nav-btn {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #71717a;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    -webkit-app-region: no-drag;
+  }
+  .nav-btn:hover { background: rgba(255,255,255,0.06); color: #e4e4e7; }
+  .nav-btn.active { background: rgba(59,130,246,0.15); color: #93c5fd; }
+  .nav-btn .icon { width: 16px; text-align: center; opacity: 0.7; }
+
+  /* ── Status dots ── */
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .dot-green  { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
+  .dot-amber  { background: #f59e0b; box-shadow: 0 0 6px #f59e0b88; }
+  .dot-red    { background: #ef4444; box-shadow: 0 0 5px #ef444488; }
+  .dot-idle   { background: #3f3f46; }
+
+  /* ── iOS-style toggle ── */
+  .ios-toggle {
+    position: relative; width: 40px; height: 22px;
+    background: #3f3f46; border-radius: 99px;
+    cursor: pointer; transition: background 0.25s;
+    -webkit-app-region: no-drag;
+    flex-shrink: 0;
+  }
+  .ios-toggle.on { background: #f59e0b; }
+  .ios-toggle.locked { opacity: 0.35; cursor: not-allowed; }
+  .ios-toggle::after {
+    content: '';
+    position: absolute; top: 2px; left: 2px;
+    width: 18px; height: 18px;
+    background: #fff; border-radius: 50%;
+    transition: transform 0.22s cubic-bezier(.34,1.56,.64,1);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+  }
+  .ios-toggle.on::after { transform: translateX(18px); }
+
+  /* ── Chat area ── */
+  #chat-scroll {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  /* ── Bubbles ── */
+  .bubble-wrap {
+    display: flex;
+    animation: bubbleIn 0.25s cubic-bezier(.21,1.01,.73,.99) both;
+  }
+  .bubble-wrap.user  { justify-content: flex-end;  }
+  .bubble-wrap.ai    { justify-content: flex-start; }
+  .bubble-wrap.sys   { justify-content: center;    }
+
+  @keyframes bubbleIn {
+    from { opacity: 0; transform: translateY(8px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0)   scale(1);    }
+  }
+
+  .bubble {
+    max-width: 72%;
+    padding: 11px 15px;
+    font-size: 13.5px;
+    line-height: 1.65;
+    word-break: break-word;
+  }
+
+  .bubble.user {
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    color: #fff;
+    border-radius: 18px 18px 5px 18px;
+    box-shadow: 0 4px 16px rgba(37,99,235,0.30);
+  }
+
+  .bubble.ai {
+    background: #1c1c20;
+    color: #e4e4e7;
+    border-radius: 18px 18px 18px 5px;
+    border: 1px solid rgba(255,255,255,0.06);
+  }
+
+  .bubble.sys {
+    background: rgba(255,255,255,0.04);
+    color: #52525b;
+    border-radius: 8px;
+    font-size: 11px;
+    padding: 4px 12px;
+    max-width: 100%;
+    text-align: center;
+  }
+
+  /* Streaming cursor */
+  .cursor-blink::after {
+    content: '▌';
+    animation: blink 0.9s step-end infinite;
+    color: #3b82f6;
+    margin-left: 1px;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ── Thinking dots ── */
+  .thinking span {
+    display: inline-block;
+    width: 6px; height: 6px;
+    background: #52525b;
+    border-radius: 50%;
+    animation: bounce 1.2s ease-in-out infinite;
+  }
+  .thinking span:nth-child(2) { animation-delay: .2s; }
+  .thinking span:nth-child(3) { animation-delay: .4s; }
+  @keyframes bounce {
+    0%,60%,100% { transform: translateY(0); }
+    30%         { transform: translateY(-5px); background: #3b82f6; }
+  }
+
+  /* ── Input zone ── */
+  #input-area {
+    background: rgba(15,15,18,0.92);
+    backdrop-filter: blur(12px);
+    border-top: 1px solid rgba(255,255,255,0.06);
+    padding: 12px 16px;
+    -webkit-app-region: no-drag;
+  }
+
+  #user-input {
+    flex: 1;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 20px;
+    padding: 10px 16px;
+    font-size: 13px;
+    font-family: 'DM Sans', sans-serif;
+    color: #e4e4e7;
+    resize: none;
+    outline: none;
+    min-height: 40px;
+    max-height: 120px;
+    overflow-y: auto;
+    transition: border-color 0.15s, background 0.15s;
+    line-height: 1.5;
+  }
+  #user-input:focus {
+    border-color: rgba(59,130,246,0.50);
+    background: rgba(59,130,246,0.04);
+  }
+  #user-input::placeholder { color: #3f3f46; }
+
+  /* ── Send button ── */
+  #send-btn {
+    width: 38px; height: 38px;
+    background: #2563eb;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.1s;
+    flex-shrink: 0;
+    border: none;
+    outline: none;
+  }
+  #send-btn:hover  { background: #3b82f6; }
+  #send-btn:active { transform: scale(0.92); }
+  #send-btn.loading { background: #1e293b; cursor: default; }
+
+  /* ── Stop btn ── */
+  #stop-btn {
+    width: 38px; height: 38px;
+    background: rgba(239,68,68,0.15);
+    border: 1px solid rgba(239,68,68,0.35);
+    border-radius: 50%;
+    display: none; align-items: center; justify-content: center;
+    cursor: pointer;
+    transition: background 0.15s;
+    flex-shrink: 0;
+  }
+  #stop-btn:hover { background: rgba(239,68,68,0.25); }
+  #stop-btn.visible { display: flex; }
+
+  /* ── Attach btn ── */
+  #attach-btn {
+    width: 38px; height: 38px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    transition: background 0.15s;
+    flex-shrink: 0;
+    color: #52525b;
+    font-size: 18px;
+    font-weight: 300;
+  }
+  #attach-btn:hover { background: rgba(255,255,255,0.09); color: #a1a1aa; }
+  #attach-btn.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+
+  /* ── Performance badge ── */
+  .perf-badge {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.08);
+    background: rgba(255,255,255,0.04);
+  }
+
+  /* ── Section headers ── */
+  .section-header {
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: #3f3f46;
+    padding: 0 12px;
+    margin: 16px 0 6px;
+  }
+
+  /* ── Markdown in AI bubbles ── */
+  .bubble.ai b, .bubble.ai strong { font-weight: 600; color: #f4f4f5; }
+  .bubble.ai code {
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    background: rgba(255,255,255,0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: #93c5fd;
+  }
+  .bubble.ai li::before { content: '•'; margin-right: 6px; color: #3b82f6; }
+
+  /* ── Tabs ── */
+  .tab-panel { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+  .tab-panel.active { display: flex; }
+
+  /* No-drag on interactive elements */
+  textarea, button, input, select, a, label {
+    -webkit-app-region: no-drag;
+  }
+</style>
+</head>
+
+<body class="flex h-screen overflow-hidden select-none">
+
+<!-- ═══════════════════════ SIDEBAR ═══════════════════════ -->
+<aside id="sidebar" class="w-44 flex flex-col py-5 px-2 flex-shrink-0 transition-all duration-200" style="min-width:0;">
+
+  <!-- Logo -->
+  <div class="px-3 mb-5">
+    <div class="text-sm font-semibold tracking-tight text-zinc-100">Neural Forge</div>
+    <div class="text-[9.5px] tracking-widest text-zinc-600 font-medium uppercase mt-0.5">Edge AI Studio</div>
+  </div>
+
+  <!-- Navigation -->
+  <div class="section-header">Navigation</div>
+  <nav class="flex flex-col gap-0.5">
+    <div class="nav-btn active" onclick="switchTab('chat', this)">
+      <span class="icon">💬</span> Chat
+    </div>
+    <div class="nav-btn" onclick="switchTab('library', this)">
+      <span class="icon">📦</span> Bibliothèque
+    </div>
+    <div class="nav-btn" onclick="switchTab('training', this)">
+      <span class="icon">⚡</span> Entraînement
+    </div>
+    <div class="nav-btn" onclick="switchTab('settings', this)">
+      <span class="icon">⚙️</span> Paramètres
+    </div>
+  </nav>
+
+  <!-- Status -->
+  <div class="section-header mt-auto pt-4">Modèles</div>
+  <div class="flex flex-col gap-2 px-3">
+    <div class="flex items-center justify-between">
+      <span class="text-xs text-zinc-500">LLM</span>
+      <div class="flex items-center gap-1.5">
+        <div id="llm-dot" class="dot dot-idle"></div>
+        <span id="llm-label" class="text-[11px] text-zinc-600">—</span>
+      </div>
+    </div>
+    <div class="flex items-center justify-between">
+      <span class="text-xs text-zinc-500">Vision</span>
+      <div class="flex items-center gap-1.5">
+        <div id="vision-dot" class="dot dot-idle"></div>
+        <span id="vision-label" class="text-[11px] text-zinc-600">—</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Turbo toggle -->
+  <div class="section-header">Performance</div>
+  <div class="px-3 flex flex-col gap-2">
+    <div class="flex items-center justify-between">
+      <div>
+        <div class="text-xs text-zinc-400 font-medium">Turbo ⚡</div>
+        <div id="turbo-sub" class="text-[10px] text-zinc-600 mt-0.5">Standard</div>
+      </div>
+      <div id="turbo-toggle" class="ios-toggle locked" title="Nécessite 12 Go RAM + modèle draft" onclick="toggleTurbo()"></div>
+    </div>
+
+    <!-- Perf badge -->
+    <div id="perf-badge" class="perf-badge text-zinc-600">CPU only</div>
+  </div>
+
+  <!-- Version -->
+  <div class="px-3 mt-4 mb-1">
+    <div class="text-[10px] text-zinc-700 font-mono">v0.1.0 — alpha</div>
+  </div>
+</aside>
+
+<!-- ═══════════════════════ MAIN CONTENT ═══════════════════════ -->
+<main class="flex flex-col flex-1 overflow-hidden">
+
+  <!-- ── TAB: CHAT ── -->
+  <div id="tab-chat" class="tab-panel active">
+
+    <!-- Header -->
+    <div class="flex items-center justify-between px-4 py-3 border-b border-white/[0.05]" style="background:rgba(9,9,11,0.8); backdrop-filter:blur(12px);">
+      <div class="flex items-center gap-2">
+        <div id="chat-dot" class="dot dot-idle"></div>
+        <span id="chat-model-label" class="text-xs text-zinc-500">Aucun modèle chargé</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <button onclick="showHistory()" class="text-xs text-zinc-600 hover:text-zinc-400 transition-colors px-2 py-1 rounded-lg hover:bg-white/5">Historique</button>
+        <button onclick="saveConversation()" class="text-xs text-zinc-600 hover:text-zinc-400 transition-colors px-2 py-1 rounded-lg hover:bg-white/5">Sauvegarder</button>
+        <button onclick="clearChat()" class="text-xs text-zinc-600 hover:text-zinc-400 transition-colors px-2 py-1 rounded-lg hover:bg-white/5">Effacer</button>
+      </div>
+    </div>
+
+    <!-- Messages -->
+    <div id="chat-scroll" class="flex-1 overflow-y-auto">
+      <div id="messages" class="flex flex-col gap-2 min-h-full justify-end"></div>
+    </div>
+
+    <!-- Attachment preview -->
+    <div id="attach-preview" class="hidden px-4 py-2 border-t border-white/[0.05]" style="background:rgba(15,15,18,0.9);">
+      <div class="flex items-center gap-3">
+        <div id="attach-thumb" class="w-10 h-10 rounded-xl bg-zinc-800 flex items-center justify-center text-xs font-mono text-blue-400 flex-shrink-0"></div>
+        <div class="flex-1 min-w-0">
+          <div id="attach-name" class="text-xs text-zinc-300 truncate"></div>
+          <div id="attach-meta" class="text-[10px] text-zinc-600"></div>
+        </div>
+        <button onclick="removeAttachment()" class="w-5 h-5 rounded-full bg-white/5 flex items-center justify-center text-zinc-500 hover:text-zinc-300 text-xs">✕</button>
+      </div>
+    </div>
+
+    <!-- Input -->
+    <div id="input-area" class="flex items-end gap-2">
+      <button id="attach-btn" title="Joindre image ou document" onclick="showAttachMenu(event)">+</button>
+      <textarea
+        id="user-input"
+        placeholder="Écrivez un message…"
+        rows="1"
+        onkeydown="handleKey(event)"
+        oninput="autoResize(this)"
+      ></textarea>
+      <button id="stop-btn" title="Arrêter" onclick="stopGeneration()">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="#ef4444">
+          <rect x="2" y="2" width="10" height="10" rx="2"/>
+        </svg>
+      </button>
+      <button id="send-btn" title="Envoyer" onclick="sendMessage()">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M8 13V3M8 3L3.5 7.5M8 3l4.5 4.5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- ── TAB: LIBRARY (placeholder) ── -->
+  <div id="tab-library" class="tab-panel items-center justify-center">
+    <div class="text-zinc-600 text-sm">Bibliothèque — ouvrez l'interface PyQt6 pour gérer les modèles.</div>
+  </div>
+
+  <!-- ── TAB: TRAINING (placeholder) ── -->
+  <div id="tab-training" class="tab-panel items-center justify-center">
+    <div class="text-zinc-600 text-sm">Entraînement LoRA — disponible dans l'interface PyQt6.</div>
+  </div>
+
+  <!-- ── TAB: SETTINGS ── -->
+  <div id="tab-settings" class="tab-panel overflow-y-auto">
+    <div class="max-w-lg mx-auto py-8 px-6 flex flex-col gap-6">
+      <h1 class="text-xl font-semibold tracking-tight">Paramètres</h1>
+
+      <!-- Model paths -->
+      <div class="flex flex-col gap-3">
+        <div class="text-[10px] font-semibold tracking-widest uppercase text-zinc-600">Modèle LLM</div>
+        <div class="flex gap-2">
+          <input id="model-path-input" type="text" placeholder="Chemin vers le .gguf…"
+            class="flex-1 bg-white/5 border border-white/8 rounded-xl px-3 py-2 text-xs text-zinc-300 placeholder-zinc-600 outline-none focus:border-blue-500/50"/>
+          <button onclick="browseModel()" class="px-3 py-2 bg-white/5 border border-white/8 rounded-xl text-xs text-zinc-400 hover:bg-white/8 transition-colors">Parcourir</button>
+        </div>
+
+        <div class="text-[10px] font-semibold tracking-widest uppercase text-zinc-600 mt-2">LoRA (optionnel)</div>
+        <div class="flex gap-2">
+          <input id="lora-path-input" type="text" placeholder="Chemin vers le .lora…"
+            class="flex-1 bg-white/5 border border-white/8 rounded-xl px-3 py-2 text-xs text-zinc-300 placeholder-zinc-600 outline-none focus:border-blue-500/50"/>
+          <button onclick="browseLora()" class="px-3 py-2 bg-white/5 border border-white/8 rounded-xl text-xs text-zinc-400 hover:bg-white/8 transition-colors">Parcourir</button>
+        </div>
+
+        <div class="text-[10px] font-semibold tracking-widest uppercase text-zinc-600 mt-2">Draft (Turbo)</div>
+        <div class="flex gap-2">
+          <input id="draft-path-input" type="text" placeholder="Petit modèle .gguf pour Turbo…"
+            class="flex-1 bg-white/5 border border-white/8 rounded-xl px-3 py-2 text-xs text-zinc-300 placeholder-zinc-600 outline-none focus:border-blue-500/50"/>
+          <button onclick="browseDraft()" class="px-3 py-2 bg-white/5 border border-white/8 rounded-xl text-xs text-zinc-400 hover:bg-white/8 transition-colors">Parcourir</button>
+        </div>
+      </div>
+
+      <!-- Load button -->
+      <button onclick="loadModel()" id="load-btn"
+        class="w-full py-3 rounded-xl font-medium text-sm transition-all"
+        style="background:#2563eb; color:#fff;">
+        Charger le modèle
+      </button>
+
+      <!-- Status -->
+      <div id="settings-status" class="text-xs text-zinc-600 text-center"></div>
+
+      <!-- HF Token -->
+      <div class="flex flex-col gap-3 pt-2 border-t border-white/[0.06]">
+        <div class="text-[10px] font-semibold tracking-widest uppercase text-zinc-600">Token HuggingFace</div>
+        <div class="flex gap-2">
+          <input id="hf-token-input" type="password" placeholder="hf_xxxxxxx…"
+            class="flex-1 bg-white/5 border border-white/8 rounded-xl px-3 py-2 text-xs text-zinc-300 placeholder-zinc-600 outline-none focus:border-blue-500/50"/>
+          <button onclick="saveHFToken()" class="px-3 py-2 bg-blue-600/20 border border-blue-500/30 rounded-xl text-xs text-blue-400 hover:bg-blue-600/30 transition-colors">Sauver</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- ── Attach menu popup ── -->
+<div id="attach-menu" class="hidden fixed z-50 flex-col"
+  style="background:#1c1c20;border:1px solid rgba(255,255,255,0.10);border-radius:14px;padding:6px;min-width:200px;box-shadow:0 16px 40px rgba(0,0,0,0.6);">
+  <div class="attach-item" onclick="attachImage()">
+    <span>🖼</span> Image (.png, .jpg…)
+  </div>
+  <div style="height:1px;background:rgba(255,255,255,0.06);margin:4px 0;"></div>
+  <div class="attach-item" onclick="attachDocument()">
+    <span>📄</span> Document (.txt, .pdf…)
+  </div>
+</div>
+
+<style>
+  .attach-item {
+    display:flex; align-items:center; gap:10px;
+    padding:9px 14px; border-radius:9px;
+    font-size:13px; color:#a1a1aa; cursor:pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+  .attach-item:hover { background:rgba(59,130,246,0.15); color:#fff; }
+</style>
+
+<script src="/eel.js"></script>
+<script src="script.js"></script>
+</body>
+</html>
