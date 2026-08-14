@@ -23,35 +23,12 @@ share/python-wheels/
 MANIFEST
 
 # --- VIRTUAL ENVIRONMENTS (Très important) ---
-# Ignore ton dossier d'installation Python
 venv/
 env/
 ENV/
 .env
 
-# --- AI & LARGE MODELS (CRITIQUE POUR TOI) ---
-# On ne veut JAMAIS envoyer ces fichiers lourds sur GitHub
-*.gguf
-*.bin
-*.pt
-*.pth
-*.ckpt
-*.safetensors
-*.onnx
-*.h5
-*.tflite
-
-# Ignore tout le contenu du dossier models/ sauf un fichier texte explicatif
-models/*
-!models/README.md
-!models/.gitkeep
-
-# Ignore les bases de données vectorielles locales (RAG)
-chroma_db/
-vector_store/
-
 # --- IDE & EDITEURS ---
-# Fichiers de configuration de ton éditeur (VS Code, PyCharm...)
 .idea/
 .vscode/
 *.swp
@@ -63,19 +40,51 @@ vector_store/
 htmlcov/
 .mypy_cache/
 
+# --- NEURAL FORGE : STOCKAGE DYNAMIQUE ---
+# Ignore le contenu des dossiers de stockage pour ne pas push les données utilisateurs/modèles
+storage/models/*
+!storage/models/.gitkeep
+!storage/models/README.md
+
+storage/data/*
+!storage/data/.gitkeep
+
+storage/images/*
+!storage/images/.gitkeep
+
+storage/logs/*
+!storage/logs/.gitkeep
+
+# Ignore les bases de données vectorielles locales (RAG) si créées à l'avenir
+storage/chroma_db/
+storage/vector_store/
+
 # --- FICHIERS TEMPORAIRES PROJET ---
-# Si ton appli génère des images ou audio temporaires
 temp/
 output/
 *.log
 *.wav
 *.mp3
 *.jpg
+*.jpeg
 *.png
 *.deb
 
-# --- TOKEN HUGGING 
+# --- AI & EXTENSIONS LOURDES (SÉCURITÉ GLOBALE) ---
+# Sécurité supplémentaire au cas où un fichier traîne à la racine
+*.gguf
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.h5
+*.tflite
+*.lora
+*.skill
 
+# --- DONNÉES SENSIBLES ---
 .neural_forge_config.json
 
 # --- OS ---

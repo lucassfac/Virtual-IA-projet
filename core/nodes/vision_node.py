@@ -1,11 +1,5 @@
 """
 vision_node.py — Nœud d'analyse d'image (LLaVA multimodal).
-
-Corrections v2 :
-  - Vérification os.path.exists() avant tout chargement
-  - Détection et gestion des espaces dans les chemins (WSL critique)
-  - try/except granulaires par étape (clip, llava, inférence)
-  - Messages d'erreur actionnables dans l'IHM
 """
 
 import base64
@@ -16,6 +10,7 @@ from typing import Optional
 from core.logger import forge_logger
 from core.node import BaseNode, InvalidDataTypeError, ModelLoadError
 from core.types import DataPacket, DataType
+from core.utils.hardware import get_profile
 
 try:
     from llama_cpp import Llama
@@ -24,85 +19,35 @@ except ImportError:
     Llama = None
     Llava15ChatHandler = None
 
-
-# ── Helpers chemins ───────────────────────────────────────────────────
-
 def _check_path(path: str, label: str) -> str:
-    """
-    Vérifie qu'un chemin existe et est lisible.
-    Si le chemin contient des espaces sous WSL, tente de créer
-    un lien symbolique dans /tmp (sans espaces) pour llama-cpp.
-
-    Retourne le chemin sûr à utiliser.
-    Lève ModelLoadError avec un message clair si le fichier est absent.
-    """
     if not path:
         raise ModelLoadError(f"{label} : chemin vide.")
-
     if not os.path.exists(path):
-        raise ModelLoadError(
-            f"{label} introuvable :\n"
-            f"  {path}\n\n"
-            f"Vérifiez que le fichier existe dans le dossier models/."
-        )
-
+        raise ModelLoadError(f"{label} introuvable :\n  {path}")
     if not os.access(path, os.R_OK):
-        raise ModelLoadError(
-            f"{label} non lisible (permissions insuffisantes) :\n  {path}"
-        )
+        raise ModelLoadError(f"{label} non lisible (permissions).")
 
-    # ── Gestion des espaces dans le chemin (problème fréquent sous WSL) ──
     if " " in path:
-        forge_logger.warning(
-            f"[VisionNode] Le chemin contient des espaces, "
-            f"ce qui peut faire échouer llama-cpp : {path}"
-        )
+        forge_logger.warning(f"[VisionNode] Espaces détectés : {path}")
         safe_path = _make_space_free_path(path, label)
-        if safe_path != path:
-            forge_logger.info(
-                f"[VisionNode] Lien symbolique créé : {safe_path}"
-            )
-            return safe_path
-
+        return safe_path
     return path
 
-
 def _make_space_free_path(original: str, label: str) -> str:
-    """
-    Crée un lien symbolique dans /tmp sans espaces.
-    Ex: '/mnt/c/Mon Dossier/model.gguf' → '/tmp/nf_model.gguf'
-    """
     try:
-        ext      = os.path.splitext(original)[1]
+        ext       = os.path.splitext(original)[1]
         safe_name = f"nf_{label.lower().replace(' ', '_')}{ext}"
         safe_path = os.path.join("/tmp", safe_name)
-
-        # Supprimer l'ancien lien si obsolète
         if os.path.islink(safe_path) and os.readlink(safe_path) != original:
             os.remove(safe_path)
-
         if not os.path.exists(safe_path):
             os.symlink(original, safe_path)
-
         return safe_path
-    except Exception as e:
-        forge_logger.warning(
-            f"[VisionNode] Impossible de créer le lien symlink ({e}). "
-            "Tentative avec le chemin original."
-        )
+    except Exception:
         return original
 
-
-# ── VisionNode ────────────────────────────────────────────────────────
-
 class VisionNode(BaseNode):
-    """
-    Nœud multimodal LLaVA : image → texte.
-    Compatible LLaVA 1.5 et 1.6 (Mistral, Vicuna).
-    """
-
     ACCEPTED_TYPES = (DataType.IMAGE_PATH,)
-
     _MIME_MAP = {
         ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
         ".png": "image/png",  ".webp": "image/webp",
@@ -112,180 +57,139 @@ class VisionNode(BaseNode):
     def __init__(self, name: str = "Vision Analyzer"):
         super().__init__(name)
         self.llm_engine:          Optional[object] = None
+        self.chat_handler:        Optional[object] = None
         self.current_model_path:  Optional[str]    = None
         self.mmproj_path:         Optional[str]    = None
-        self.text_prompt:         str              = "Décris cette image en détail."
+        self.text_prompt:         str              = "Décris cette image avec le plus de détails possible, en lisant tout le texte visible."
 
-    # ── Chargement ────────────────────────────────────────────────────
+        self.high_res_mode:       bool             = True 
 
-    def load_model(self, model_path: str, mmproj_path: str) -> None:  # type: ignore
-        """
-        Charge le modèle LLaVA + son projecteur multimodal.
+    def set_high_res_mode(self, enabled: bool):
+        self.high_res_mode = enabled
 
-        Erreurs possibles et messages correspondants :
-          - Fichier absent        → chemin affiché + conseil
-          - Espaces dans le chemin → symlink automatique dans /tmp
-          - Mismatch mmproj       → conseil de télécharger le bon mmproj
-          - llama-cpp sans LLaVA  → commande de recompilation affichée
-        """
+    def unload_model(self) -> None:
+        if self.llm_engine is not None:
+            try:
+                self.llm_engine.close()
+            except Exception:
+                pass
+            del self.llm_engine
+            self.llm_engine = None
+            
+        if getattr(self, 'chat_handler', None) is not None:
+            del self.chat_handler
+            self.chat_handler = None
+            
+        self.current_model_path = None
+        self.mmproj_path = None
+        self.model_loaded = False
+        import gc
+        gc.collect()
+        forge_logger.info(f"[{self.name}] Moteur Vision déchargé, VRAM libérée.")
+
+    def load_model(self, model_path: str, mmproj_path: str) -> None: 
         if Llama is None or Llava15ChatHandler is None:
-            raise ModelLoadError(
-                "llama-cpp-python n'est pas installé ou ne supporte pas LLaVA.\n\n"
-                "Réinstallez avec :\n"
-                "  pip uninstall llama-cpp-python -y\n"
-                '  CMAKE_ARGS="-DLLAVA_BUILD=ON" pip install llama-cpp-python --no-cache-dir'
-            )
+            raise ModelLoadError("llama-cpp-python sans support LLaVA.")
 
-        # ── Étape 1 : Vérification et nettoyage des chemins ──
+        safe_model  = _check_path(model_path,  "Modèle LLaVA")
+        safe_mmproj = _check_path(mmproj_path, "Projecteur mmproj")
+        hw = get_profile()
+
         try:
-            safe_model  = _check_path(model_path,  "Modèle LLaVA")
-            safe_mmproj = _check_path(mmproj_path, "Projecteur mmproj")
-        except ModelLoadError:
-            raise
-
-        forge_logger.log_node_event(
-            self.name, "LOAD_VISION_MODEL",
-            f"model={os.path.basename(safe_model)}  "
-            f"mmproj={os.path.basename(safe_mmproj)}"
-        )
-
-        # ── Étape 2 : Chargement du projecteur CLIP ──
-        try:
-            chat_handler = Llava15ChatHandler(clip_model_path=safe_mmproj)
+            self.chat_handler = Llava15ChatHandler(clip_model_path=safe_mmproj)
         except Exception as e:
-            err_str = str(e).lower()
-            if "mismatch" in err_str or "n_embd" in err_str:
-                raise ModelLoadError(
-                    "Incompatibilité modèle / mmproj.\n\n"
-                    "Le fichier mmproj ne correspond pas au modèle LLaVA.\n"
-                    "Chaque modèle LLaVA a son propre projecteur :\n\n"
-                    "  llava-v1.6-mistral-7b  →  cjpais/llava-1.6-mistral-7b-gguf\n"
-                    "                              fichier : mmproj-model-f16.gguf\n\n"
-                    "  llava-v1.5-7b          →  mys/gguf-llava-v1.5-7b\n"
-                    "                              fichier : mmproj-model-f16.gguf\n\n"
-                    f"Erreur brute : {e}"
-                )
-            elif "failed to load" in err_str or "mtmd" in err_str:
-                raise ModelLoadError(
-                    "Échec du chargement du projecteur multimodal (mmproj).\n\n"
-                    "Causes possibles :\n"
-                    "1. Fichier mmproj corrompu ou incomplet.\n"
-                    "2. llama-cpp-python compilé sans support LLaVA.\n\n"
-                    "Solution :\n"
-                    "  pip uninstall llama-cpp-python -y\n"
-                    '  CMAKE_ARGS="-DLLAVA_BUILD=ON" '
-                    "pip install llama-cpp-python --no-cache-dir\n\n"
-                    f"Erreur brute : {e}"
-                )
-            else:
-                raise ModelLoadError(
-                    f"Erreur projecteur CLIP : {e}\n\n"
-                    f"Fichier mmproj : {safe_mmproj}"
-                )
+            raise ModelLoadError(f"Erreur projecteur CLIP : {e}")
 
-        # ── Étape 3 : Chargement du modèle LLaVA ──
+        nom_fichier = os.path.basename(safe_model).lower()
+        format_detecte = "vicuna"
+        if "mistral" in nom_fichier or "mixtral" in nom_fichier:
+            format_detecte = "mistral"
+        elif "chatml" in nom_fichier or "qwen" in nom_fichier or "hermes" in nom_fichier:
+            format_detecte = "chatml"
+            
+        forge_logger.info(f"[{self.name}] Auto-détection format vision : {format_detecte}")
+
         try:
             self.llm_engine = Llama(
                 model_path=safe_model,
-                chat_handler=chat_handler,
+                chat_handler=self.chat_handler,
+                chat_format=format_detecte,
                 n_ctx=4096,
-                n_gpu_layers=-1,
+                n_gpu_layers=hw.n_gpu_layers,
                 verbose=False,
             )
-        except FileNotFoundError:
-            raise ModelLoadError(
-                f"Modèle LLaVA introuvable après symlink :\n  {safe_model}\n"
-                "Vérifiez que le fichier est accessible."
-            )
         except Exception as e:
-            raise ModelLoadError(
-                f"Échec du chargement LLaVA :\n  {e}\n\n"
-                f"Modèle  : {safe_model}\n"
-                f"mmproj  : {safe_mmproj}"
-            )
+            raise ModelLoadError(f"Échec du chargement LLaVA :\n  {e}")
 
-        self.current_model_path = model_path   # conserver le chemin original
+        self.current_model_path = model_path
         self.mmproj_path        = mmproj_path
         super().load_model(model_path)
-        forge_logger.log_node_event(self.name, "VISION_READY",
-                                    os.path.basename(model_path))
-
-    # ── Prompt ────────────────────────────────────────────────────────
 
     def set_prompt(self, prompt: str) -> None:
         self.text_prompt = prompt
-        forge_logger.log_node_event(self.name, "PROMPT_SET", prompt[:80])
-
-    # ── Inférence ─────────────────────────────────────────────────────
 
     def _run_inference(self) -> DataPacket:
-        if self.input_packet.data_type != DataType.IMAGE_PATH:
-            raise InvalidDataTypeError(
-                f"VisionNode requiert IMAGE_PATH, "
-                f"reçu : {self.input_packet.data_type.value}"
-            )
-
         image_path: str = self.input_packet.content
+        data_url = self._image_to_data_url(image_path)
 
-        # Vérification de l'image avant envoi
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(
-                f"Image introuvable : '{image_path}'"
-            )
+        prompt_bas = self.text_prompt.lower()
+        mots_precision = ["lis", "texte", "exo", "exercice", "mcd", "sql", "code", "chiffre"]
+        temp = 0.1 if any(kw in prompt_bas for kw in mots_precision) else 0.4
 
-        forge_logger.log_node_event(self.name, "VISION_INFERENCE_START",
-                                    os.path.basename(image_path))
-
-        # Conversion base64
-        try:
-            data_url = self._image_to_data_url(image_path)
-        except Exception as e:
-            raise RuntimeError(f"Impossible de lire l'image : {e}")
-
-        # Appel LLaVA
         try:
             response = self.llm_engine.create_chat_completion(
                 messages=[{
                     "role": "user",
                     "content": [
-                        {"type": "image_url",
-                         "image_url": {"url": data_url}},
-                        {"type": "text", "text": self.text_prompt},
+                        {"type": "image_url", "image_url": {"url": data_url}}, # ✅ IMAGE EN PREMIER (Indispensable)
+                        {"type": "text", "text": self.text_prompt},           # ✅ TEXTE EN DEUXIÈME
                     ],
                 }],
-                max_tokens=800,
+                max_tokens=1024,
+                temperature=temp,
+                repeat_penalty=1.2,
+                frequency_penalty=0.5,
             )
-            result_text: str = (
-                response["choices"][0]["message"]["content"].strip()
-            )
+            result_text: str = response["choices"][0]["message"]["content"].strip()
+            
         except Exception as e:
-            raise RuntimeError(
-                f"Erreur pendant l'analyse LLaVA : {e}\n"
-                "Le modèle ou le mmproj pourrait être incompatible."
-            )
+            raise RuntimeError(f"Erreur pendant l'analyse LLaVA : {e}")
 
-        if not result_text:
-            result_text = "(Analyse vide — vérifiez le modèle LLaVA et le mmproj)"
-
-        forge_logger.log_node_event(self.name, "VISION_INFERENCE_END",
-                                    f"len={len(result_text)}")
+        if not result_text or "MSGMSG" in result_text:
+            result_text = "(Le module visuel a rencontré une difficulté technique sur cette zone de l'image.)"
 
         return DataPacket(
             DataType.TEXT, result_text,
-            metadata={
-                "image_path": image_path,
-                "prompt":     self.text_prompt,
-                "model":      self.current_model_path,
-                "mmproj":     self.mmproj_path,
-            },
+            metadata={"image_path": image_path, "model": self.current_model_path, "temp_used": temp},
             source=self.name,
         )
 
-    # ── Utilitaire ────────────────────────────────────────────────────
-
     def _image_to_data_url(self, image_path: str) -> str:
-        ext       = os.path.splitext(image_path)[1].lower()
+        """Choisit dynamiquement la résolution de l'image (Vitesse vs Précision)."""
+        ext = os.path.splitext(image_path)[1].lower()
         mime_type = self._MIME_MAP.get(ext, "image/jpeg")
-        with open(image_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("utf-8")
-        return f"data:{mime_type};base64,{b64}"
+
+        if self.high_res_mode:
+            # MODE PRÉCISION (MCD, Textes) -> Garde l'image intacte pour le Slicing
+            with open(image_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("utf-8")
+            return f"data:{mime_type};base64,{b64}"
+            
+        else:
+            # MODE RAPIDE (Paysages, Objets) -> Downsampling à 336x336
+            from PIL import Image
+            import io
+            try:
+                with Image.open(image_path) as img:
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    img.thumbnail((336, 336))
+                    buffered = io.BytesIO()
+                    img.save(buffered, format="JPEG", quality=85)
+                    b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                return f"data:image/jpeg;base64,{b64}"
+            except Exception as e:
+                forge_logger.error(f"[VisionNode] Erreur downsampling : {e}")
+                with open(image_path, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                return f"data:{mime_type};base64,{b64}"

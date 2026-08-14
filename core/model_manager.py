@@ -17,7 +17,9 @@ from typing import Callable, List, Optional
 # Fichier de config local (non versionné)
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CONFIG_FILE  = os.path.join(_PROJECT_ROOT, ".neural_forge_config.json")
-DEFAULT_MODELS_DIR = os.path.join(_PROJECT_ROOT, "models")
+
+# Modification vers le nouveau dossier de stockage
+DEFAULT_MODELS_DIR = os.path.join(_PROJECT_ROOT, "storage", "models")
 
 
 def get_project_root() -> str:

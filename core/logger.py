@@ -29,8 +29,9 @@ class NeuralForgeLogger:
             return
         self._initialized = True
 
-        os.makedirs("logs", exist_ok=True)
-        log_filename = f"logs/neural_forge_{time.strftime('%Y%m%d_%H%M%S')}.log"
+        # Modification vers le nouveau dossier de stockage
+        os.makedirs("storage/logs", exist_ok=True)
+        log_filename = f"storage/logs/neural_forge_{time.strftime('%Y%m%d_%H%M%S')}.log"
 
         self.logger = logging.getLogger("NeuralForge")
         self.logger.setLevel(logging.DEBUG)

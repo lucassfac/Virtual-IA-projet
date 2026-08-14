@@ -1,10 +1,12 @@
 """
 llm_node.py — Moteur d'inférence haute performance Neural Forge.
-Paramètres auto-détectés depuis hardware.py à chaque load_model().
+Version 4.0 : Système de "Skills" RAG dynamique (Fichiers .skill) et Fallback GPU.
 """
 
 import os
-from typing import Generator, Optional
+import gc
+import json
+from typing import Generator, Optional, List, Dict
 
 from core.logger import forge_logger
 from core.node import AIModelMissingError, BaseNode, ModelLoadError
@@ -16,6 +18,36 @@ try:
 except ImportError:
     Llama = None
 
+# ── Helpers chemins ───────────────────────────────────────────────────
+
+def _check_path(path: str, label: str) -> str:
+    if not path:
+        raise ModelLoadError(f"{label} : chemin vide.")
+    if not os.path.exists(path):
+        raise ModelLoadError(f"{label} introuvable : '{path}'")
+    if not os.access(path, os.R_OK):
+        raise ModelLoadError(f"{label} non lisible (permissions).")
+
+    if " " in path:
+        forge_logger.warning(f"[{label}] Espaces détectés. Création d'un symlink...")
+        return _make_space_free_path(path, label)
+    return path
+
+def _make_space_free_path(original: str, label: str) -> str:
+    try:
+        ext = os.path.splitext(original)[1]
+        safe_name = f"nf_{label.lower().replace(' ', '_')}{ext}"
+        safe_path = os.path.join("/tmp", safe_name)
+        if os.path.islink(safe_path) and os.readlink(safe_path) != original:
+            os.remove(safe_path)
+        if not os.path.exists(safe_path):
+            os.symlink(original, safe_path)
+        return safe_path
+    except Exception:
+        return original
+
+
+# ── LLMNode ───────────────────────────────────────────────────────────
 
 class LLMNode(BaseNode):
 
@@ -26,211 +58,175 @@ class LLMNode(BaseNode):
         self.llm_engine:         Optional[object]          = None
         self.draft_engine:       Optional[object]          = None
         self.current_model_path: Optional[str]             = None
-        self.current_lora_path:  Optional[str]             = None
-        self._lora_is_simulated: bool                      = False
+        
+        # NOUVEAU : Variables pour les compétences (Skills)
+        self.current_skill_path: Optional[str]             = None
+        self.skill_system_prompt: str                      = ""
+        self.skill_knowledge_base: str                     = ""
+        
         self._turbo_active:      bool                      = False
         self.hw:                 Optional[HardwareProfile] = None
 
-    # ── LoRA validation ───────────────────────────────────────────────
+        self.conversation_history: List[Dict[str, str]]    = []
 
-    @staticmethod
-    def _is_real_lora(path: str) -> bool:
-        if not path or not os.path.exists(path):
-            return False
-        try:
-            with open(path, "rb") as f:
-                magic = f.read(4)
-            return magic == b"GGUF" or magic[:3] == b"ggm"
-        except OSError:
-            return False
+    def unload_model(self) -> None:
+        """Décharge le modèle et FORCE la destruction du contexte C++."""
+        if self.llm_engine is not None:
+            try:
+                self.llm_engine.close()
+            except Exception:
+                pass
+            del self.llm_engine
+            self.llm_engine = None
+            
+        if self.draft_engine is not None:
+            try:
+                self.draft_engine.close()
+            except Exception:
+                pass
+            del self.draft_engine
+            self.draft_engine = None
+            
+        self.current_model_path = None
+        self.current_skill_path = None
+        self.skill_system_prompt = ""
+        self.skill_knowledge_base = ""
+        self.model_loaded = False
+        gc.collect() 
+        forge_logger.info(f"[{self.name}] Moteur déchargé, VRAM libérée.")
+
+    def clear_history(self) -> None:
+        self.conversation_history = []
+        forge_logger.info(f"[{self.name}] Historique effacé.")
+
+    # ── Moteur Skill (RAG) ────────────────────────────────────────────
+
+    def _get_skill_context(self) -> list:
+        """Prépare le prompt système si une compétence est équipée."""
+        if self.skill_system_prompt and self.skill_knowledge_base:
+            forge_logger.info(f"[{self.name}] Skill actif injecté dans le contexte.")
+            return [{
+                "role": "system",
+                "content": f"{self.skill_system_prompt}\n\nBASE DE CONNAISSANCES:\n{self.skill_knowledge_base}"
+            }]
+        return []
 
     # ── Chargement ────────────────────────────────────────────────────
 
-    def load_model(
-        self,
-        model_path:       str,
-        lora_path:        Optional[str] = None,
-        draft_model_path: Optional[str] = None,
-        turbo:            bool          = False,
-    ) -> None:
+    def load_model(self, model_path: str, skill_path: Optional[str] = None, draft_model_path: Optional[str] = None, turbo: bool = False) -> None:
         if Llama is None:
             raise ModelLoadError("llama-cpp-python n'est pas installé.")
 
+        self.unload_model()
         self.hw = get_profile()
 
-        # ── LoRA ──
-        effective_lora = None
-        self._lora_is_simulated = False
-        if lora_path:
-            if self._is_real_lora(lora_path):
-                effective_lora = lora_path
-            else:
-                self._lora_is_simulated = True
-                forge_logger.warning(
-                    f"[{self.name}] LoRA simulé ignoré : "
-                    f"'{os.path.basename(lora_path)}'"
-                )
-
-        # ── Turbo gate ──
-        self._turbo_active = False
-        if turbo:
-            if not self.hw.turbo_eligible:
-                forge_logger.warning(
-                    f"[{self.name}] Turbo refusé — RAM {self.hw.ram_total_gb} Go < 12 Go."
-                )
-            elif not draft_model_path or not os.path.exists(draft_model_path):
-                forge_logger.warning(
-                    f"[{self.name}] Turbo refusé — pas de modèle draft."
-                )
-            else:
-                self._turbo_active = True
-
-        mode = "TURBO" if self._turbo_active else "STANDARD"
-        forge_logger.log_node_event(
-            self.name, "LOAD_MODEL",
-            f"[{mode}] {os.path.basename(model_path)}  "
-            f"threads={self.hw.n_threads}  ctx={self.hw.n_ctx}  "
-            f"gpu={self.hw.n_gpu_layers}  batch={self.hw.n_batch}  "
-            f"flash={self.hw.flash_attn}"
-        )
-
-        # ── Moteur principal ──
-        try:
-            kwargs = dict(
-                model_path    = model_path,
-                lora_path     = effective_lora,
-                n_ctx         = self.hw.n_ctx,
-                n_threads     = self.hw.n_threads,
-                n_threads_batch = self.hw.n_threads,
-                n_batch       = self.hw.n_batch,
-                n_gpu_layers  = self.hw.n_gpu_layers,
-                use_mmap      = self.hw.use_mmap,
-                use_mlock     = False,
-                verbose       = False,
-            )
-            # Paramètres optionnels selon version llama-cpp
-            if self.hw.flash_attn:
-                kwargs["flash_attn"] = True
+        safe_model_path = _check_path(model_path, "Modèle Principal")
+        safe_draft_path = _check_path(draft_model_path, "Modèle Draft") if draft_model_path else None
+        
+        # ── Lecture du fichier .skill ──
+        if skill_path and os.path.exists(skill_path):
             try:
-                kwargs["n_ubatch"] = self.hw.n_ubatch
-            except Exception:
-                pass
-
-            self.llm_engine = Llama(**kwargs)
-
-        except TypeError as e:
-            # Vieille API — retire les kwargs inconnus
-            for k in ("flash_attn", "n_ubatch"):
-                kwargs.pop(k, None)
-            self.llm_engine = Llama(**kwargs)
-        except FileNotFoundError:
-            raise ModelLoadError(
-                f"[{self.name}] Introuvable : '{model_path}'"
-            )
-        except Exception as e:
-            raise ModelLoadError(f"[{self.name}] Chargement échoué : {e}")
-
-        # ── Modèle draft (Turbo) ──
-        self.draft_engine = None
-        if self._turbo_active:
-            try:
-                self.draft_engine = Llama(
-                    model_path   = draft_model_path,
-                    n_ctx        = self.hw.n_ctx,
-                    n_threads    = self.hw.n_threads,
-                    n_gpu_layers = self.hw.n_gpu_layers,
-                    use_mmap     = True,
-                    verbose      = False,
-                )
-                forge_logger.log_node_event(
-                    self.name, "TURBO_DRAFT_OK",
-                    os.path.basename(draft_model_path)
-                )
+                with open(skill_path, "r", encoding="utf-8") as f:
+                    skill_data = json.load(f)
+                    if skill_data.get("type") == "rag_skill":
+                        self.current_skill_path = skill_path
+                        self.skill_system_prompt = skill_data.get("system_prompt", "")
+                        self.skill_knowledge_base = skill_data.get("knowledge_base", "")
+                        forge_logger.info(f"[{self.name}] Compétence '{skill_data.get('name')}' chargée avec succès.")
+                    else:
+                        forge_logger.warning(f"[{self.name}] Fichier skill invalide ignoré.")
             except Exception as e:
-                forge_logger.warning(
-                    f"[{self.name}] Draft échoué ({e}) — retour Standard."
-                )
-                self._turbo_active = False
-                self.draft_engine  = None
+                forge_logger.error(f"[{self.name}] Erreur de lecture du skill : {e}")
+
+        self._turbo_active = False
+        if turbo and safe_draft_path and self.hw.turbo_eligible:
+            self._turbo_active = True
+
+        # Context Window à 4096 pour supporter la base de connaissances du Skill
+        kwargs = dict(
+            model_path      = safe_model_path,
+            n_ctx           = 4096, 
+            n_threads       = self.hw.n_threads,
+            n_threads_batch = self.hw.n_threads,
+            n_batch         = self.hw.n_batch,
+            n_gpu_layers    = self.hw.n_gpu_layers,
+            use_mmap        = self.hw.use_mmap,
+            logits_all      = False,
+            verbose         = False,
+        )
+        if self.hw.flash_attn:
+            kwargs["flash_attn"] = True
+
+        try:
+            self.llm_engine = Llama(**kwargs)
+        except Exception as e:
+            forge_logger.warning(f"[{self.name}] Échec GPU. Fallback CPU...")
+            kwargs["n_gpu_layers"] = 0
+            kwargs["n_ctx"] = 2048 
+            try:
+                self.llm_engine = Llama(**kwargs)
+            except Exception as fallback_err:
+                raise ModelLoadError(f"Échec total : {fallback_err}")
 
         self.current_model_path = model_path
-        self.current_lora_path  = lora_path
-        super().load_model(model_path)
-        forge_logger.log_node_event(
-            self.name, "READY",
-            f"[{'TURBO' if self._turbo_active else 'STANDARD'}] "
-            f"{os.path.basename(model_path)}"
-        )
+        self.model_loaded = True
 
-    # ── Inférence bloquante ───────────────────────────────────────────
+    # ── Inférence ─────────────────────────────────────────────────────
 
     def _run_inference(self) -> DataPacket:
         prompt = self.input_packet.content
-        output = self.llm_engine(
-            f"Question: {prompt}\nRéponse:",
-            max_tokens=2048,
-            stop=["Question:"],
-            echo=False,
-            temperature=0.7,
-            repeat_penalty=1.1,
-        )
-        text: str   = output["choices"][0]["text"].strip() or "(Réponse vide)"
-        finish: str = output["choices"][0].get("finish_reason", "unknown")
-        return DataPacket(
-            DataType.TEXT, text,
-            metadata={
-                "model":         self.current_model_path,
-                "lora":          self.current_lora_path,
-                "lora_applied":  not self._lora_is_simulated,
-                "turbo":         self._turbo_active,
-                "finish_reason": finish,
-            },
-            source=self.name,
-        )
+        self.conversation_history.append({"role": "user", "content": prompt})
+        if len(self.conversation_history) > 10:
+            self.conversation_history = self.conversation_history[-10:]
 
-    # ── Streaming ─────────────────────────────────────────────────────
+        forge_logger.log_node_event(self.name, "INFERENCE_START", "Génération en cours...")
+
+        # INJECTION DU SKILL
+        messages_to_send = self._get_skill_context() + self.conversation_history
+
+        output = self.llm_engine.create_chat_completion(
+            messages=messages_to_send,
+            max_tokens=1024,
+            temperature=0.3 if self.current_skill_path else 0.7, # Température basse si un skill est actif
+            stream=False
+        )
+        
+        answer: str = output["choices"][0]["message"]["content"].strip()
+        self.conversation_history.append({"role": "assistant", "content": answer})
+
+        return DataPacket(DataType.TEXT, answer, metadata={"model": self.current_model_path}, source=self.name)
 
     def stream_inference(self, packet: DataPacket) -> Generator[str, None, None]:
         self.set_input(packet)
         if not self.model_loaded:
             raise AIModelMissingError(f"[{self.name}] Aucun modèle chargé.")
 
-        forge_logger.log_node_event(
-            self.name, "STREAM_START",
-            f"{'TURBO' if self._turbo_active else 'STANDARD'}"
-        )
+        self.conversation_history.append({"role": "user", "content": self.input_packet.content})
+        if len(self.conversation_history) > 10:
+            self.conversation_history = self.conversation_history[-10:]
 
-        stream = self.llm_engine(
-            f"Question: {self.input_packet.content}\nRéponse:",
-            max_tokens=2048,
-            stop=["Question:"],
-            echo=False,
+        # INJECTION DU SKILL
+        messages_to_send = self._get_skill_context() + self.conversation_history
+
+        stream = self.llm_engine.create_chat_completion(
+            messages=messages_to_send,
+            max_tokens=1024,
             stream=True,
-            temperature=0.7,
-            repeat_penalty=1.1,
+            temperature=0.3 if self.current_skill_path else 0.7,
         )
+        
+        full_answer = ""
         for chunk in stream:
-            tok: str = chunk["choices"][0]["text"]
+            delta = chunk["choices"][0].get("delta", {})
+            tok = delta.get("content", "")
             if tok:
+                full_answer += tok
                 yield tok
 
-        forge_logger.log_node_event(self.name, "STREAM_END")
-
-    # ── Statut ────────────────────────────────────────────────────────
+        self.conversation_history.append({"role": "assistant", "content": full_answer})
 
     def get_status(self) -> dict:
         base = super().get_status()
         if self.hw:
-            base.update({
-                "turbo_active":   self._turbo_active,
-                "turbo_eligible": self.hw.turbo_eligible,
-                "ram_total_gb":   self.hw.ram_total_gb,
-                "gpu":            self.hw.gpu.name,
-                "gpu_vram_gb":    self.hw.gpu.vram_gb,
-                "cuda_ok":        self.hw.gpu.cuda_ok,
-                "n_threads":      self.hw.n_threads,
-                "n_ctx":          self.hw.n_ctx,
-                "flash_attn":     self.hw.flash_attn,
-                "draft_loaded":   self.draft_engine is not None,
-            })
+            base.update({"cuda_ok": self.hw.gpu.cuda_ok, "n_ctx": self.hw.n_ctx})
         return base

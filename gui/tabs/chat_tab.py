@@ -311,12 +311,12 @@ class ChatTab(QWidget):
 
     # ── API publique ──────────────────────────────────────────────────
 
-    def on_model_loaded(self, model_path: str, lora_path: str):
+    def on_model_loaded(self, model_path: str, skill_path: str):
         name = os.path.basename(model_path)
-        lora = f" + {os.path.basename(lora_path)}" if lora_path else ""
-        self._model_lbl.setText(f"{name}{lora}")
+        skill = f" + {os.path.basename(skill_path)}" if skill_path else ""
+        self._model_lbl.setText(f"{name}{skill}")
         self._set_dot("#30D158")
-        self._sys(f"Modèle prêt : {name}{lora}")
+        self._sys(f"Modèle prêt : {name}{skill}")
 
     # ── Attachements ──────────────────────────────────────────────────
 
@@ -418,26 +418,44 @@ class ChatTab(QWidget):
         doc_path = self._attached_doc
         self._remove_attachment()
 
-        if has_img and self.vision_node.model_loaded:
-            if text: self.vision_node.set_prompt(text)
-            packet = DataPacket(DataType.IMAGE_PATH, img_path, source="user")
-            self._worker = VisionWorker(self.vision_node, packet)
-            self._worker.result.connect(self._on_result)
-            self._worker.error.connect(self._on_error)
-            self._worker.finished.connect(self._on_done)
-            self._worker.start()
-        elif has_img and not self.vision_node.model_loaded:
-            # Pas de modèle LLaVA → envoyer l'image en texte avec avertissement
-            self._history = self._history.replace(_THINKING, "", 1)
-            self._sys(
-                "⚠ Aucun modèle LLaVA chargé — l'image ne peut pas être analysée. "
-                "Chargez un modèle LLaVA dans Paramètres pour l'analyse d'image. "
-                "La question textuelle sera traitée seule si vous en avez posé une."
-            )
-            if text:
-                self._start_stream(DataPacket(DataType.TEXT, text, source="user"))
-            else:
+        if has_img:
+            from core.session_manager import load_last_model, load_vision_model
+            llm_paths = load_last_model()
+            vis_paths = load_vision_model()
+
+            # Vérification : A-t-on les chemins de LLaVA ?
+            if not vis_paths[0] or not vis_paths[1]:
+                self._history = self._history.replace(_THINKING, "", 1)
+                self._sys("⚠ Impossible d'analyser l'image : Modèle Vision ou mmproj introuvable. Allez dans Paramètres et chargez LLaVA au moins une fois.")
                 self._unlock()
+                return
+
+            # Si le modèle texte est actif, on déclenche le "Model Swapping"
+            if self.llm_node.model_loaded:
+                self._sys("⚙️ <b>Orchestrateur activé :</b> Model Swapping pour préserver la VRAM (4Go max).")
+                from gui.workers import SwapOrchestratorWorker
+                self._stream_buf = ""
+                self._worker = SwapOrchestratorWorker(
+                    self.llm_node, self.vision_node,
+                    img_path, text or "Que vois-tu sur cette image ?",
+                    llm_paths, vis_paths
+                )
+                # Le statut s'affichera directement dans la fenêtre de chat !
+                self._worker.status.connect(lambda s: self._sys(f"<font color='#0A84FF'>{s}</font>"))
+                self._worker.token.connect(self._on_token)
+                self._worker.error.connect(self._on_error)
+                self._worker.finished.connect(self._on_stream_done)
+                self._worker.start()
+            else:
+                # Comportement classique si aucun LLM n'est chargé
+                if text: self.vision_node.set_prompt(text)
+                packet = DataPacket(DataType.IMAGE_PATH, img_path, source="user")
+                from gui.workers import VisionWorker
+                self._worker = VisionWorker(self.vision_node, packet)
+                self._worker.result.connect(self._on_result)
+                self._worker.error.connect(self._on_error)
+                self._worker.finished.connect(self._on_done)
+                self._worker.start()
         elif has_doc:
             try:
                 result = read_document(doc_path, llm_node=self.llm_node)

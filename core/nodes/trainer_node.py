@@ -1,15 +1,13 @@
 """
-trainer_node.py — Nœud de spécialisation LoRA.
+trainer_node.py — Compilateur de Compétences (Skill Compiler).
 
-Différences vs BaseNode :
-  - Accepte deux entrées (dataset + modèle de base) via set_inputs()
-  - Surcharge process() avec ses propres règles de sécurité
-  - Expose un callback de progression pour la barre de l'IHM PyQt6
-  - Génère un nom d'adaptateur dérivé du dataset
+Transforme un dataset brut (TXT, JSONL) en un module d'expertise portable (.skill).
+Ce module sera ensuite injecté via RAG dans le LLMNode.
 """
 
 import os
 import time
+import json
 from typing import Callable, Optional
 
 from core.logger import forge_logger
@@ -17,168 +15,111 @@ from core.node import BaseNode
 from core.types import DataPacket, DataType
 
 
-class TrainingError(Exception):
-    """Levée si l'entraînement rencontre une erreur irrécupérable."""
-
-
 class TrainerNode(BaseNode):
     """
-    Usine de spécialisation : dataset + modèle de base → adaptateur .lora
+    Usine de spécialisation : dataset brut → module d'expertise (.skill)
     """
 
-    def __init__(self, name: str = "LoRA Trainer", output_dir: str = "models"):
+    def __init__(self, name: str = "Skill Compiler", output_dir: str = "storage/models"):
         super().__init__(name)
         self.dataset_path: Optional[str] = None
-        self.base_model_path: Optional[str] = None
+        self.base_model_path: Optional[str] = None # Conservé pour compatibilité IHM
         self.output_dir = output_dir
-        self.output_adapter_path: Optional[str] = None
+        self.output_skill_path: Optional[str] = None
 
-        # Callback optionnel : fn(step: int, total: int, loss: float)
         self._progress_callback: Optional[Callable] = None
-
-        # Le Trainer n'a pas besoin d'un modèle d'inférence chargé
-        self.model_loaded = True
+        self.model_loaded = True # Pas besoin de charger de LLM pour compiler un texte
 
     # ------------------------------------------------------------------
-    # Entrées spécifiques au training
+    # Entrées
     # ------------------------------------------------------------------
 
-    def set_inputs(
-        self, dataset_packet: DataPacket, model_packet: DataPacket
-    ) -> None:
+    def set_inputs(self, dataset_packet: DataPacket, model_packet: DataPacket) -> None:
         """
-        Fournit les deux ingrédients nécessaires à l'entraînement.
-
-        :param dataset_packet: DataPacket TEXT contenant le chemin du .jsonl
-        :param model_packet:   DataPacket TEXT contenant le chemin du .gguf
+        Reçoit le dataset depuis l'interface. 
+        (Le model_packet est ignoré dans cette version RAG, mais gardé pour l'IHM).
         """
-        if dataset_packet.data_type != DataType.TEXT:
-            raise TypeError(
-                f"[{self.name}] Le dataset doit être de type TEXT "
-                f"(chemin vers un .jsonl), reçu : {dataset_packet.data_type.value}"
-            )
-        if model_packet.data_type != DataType.TEXT:
-            raise TypeError(
-                f"[{self.name}] Le modèle de base doit être de type TEXT "
-                f"(chemin vers un .gguf), reçu : {model_packet.data_type.value}"
-            )
-
         self.dataset_path = dataset_packet.content
         self.base_model_path = model_packet.content
-
-        dataset_packet.log_step(self.name, "reçu_comme_dataset")
-        model_packet.log_step(self.name, "reçu_comme_modèle_de_base")
-
-        forge_logger.log_node_event(
-            self.name, "INPUTS_SET",
-            f"dataset={self.dataset_path}, model={self.base_model_path}"
-        )
+        
+        forge_logger.log_node_event(self.name, "INPUTS_SET", f"dataset={self.dataset_path}")
 
     def set_progress_callback(self, callback: Callable) -> None:
-        """
-        Enregistre un callback appelé à chaque étape d'entraînement.
-        Signature : callback(step: int, total: int, loss: float)
-        Utilisé pour mettre à jour la QProgressBar dans l'IHM.
-        """
         self._progress_callback = callback
 
     # ------------------------------------------------------------------
-    # Surcharge de process()
+    # Traitement
     # ------------------------------------------------------------------
 
     def process(self) -> DataPacket:
-        """
-        Règles de sécurité spécifiques au training, puis délégation.
-        """
         if not self.dataset_path:
-            raise ValueError(
-                f"[{self.name}] Aucun dataset fourni. "
-                "Appelez set_inputs() avant process()."
-            )
-        if not self.base_model_path:
-            raise ValueError(
-                f"[{self.name}] Aucun modèle de base fourni. "
-                "Appelez set_inputs() avant process()."
-            )
+            raise ValueError(f"[{self.name}] Aucun dataset fourni.")
 
-        forge_logger.log_node_event(self.name, "TRAINING_START")
-        result = self._run_inference()
-        forge_logger.log_node_event(
-            self.name, "TRAINING_END", result.content
-        )
+        forge_logger.log_node_event(self.name, "COMPILATION_START")
+        result = self._compile_skill()
+        forge_logger.log_node_event(self.name, "COMPILATION_END", result.content)
         return result
 
     # ------------------------------------------------------------------
-    # Entraînement simulé
+    # Compilation du Skill (RAG)
     # ------------------------------------------------------------------
 
-    def _run_inference(self) -> DataPacket:
-        """
-        Simule l'entraînement LoRA avec une courbe de loss décroissante.
-        Dans la v2, cette méthode appellera llama.cpp ou PEFT.
-        """
-        forge_logger.info(f"[{self.name}] --- DÉBUT DE L'ENTRAÎNEMENT ---")
-        forge_logger.info(f"[{self.name}] Modèle de base : {self.base_model_path}")
-        forge_logger.info(f"[{self.name}] Dataset        : {self.dataset_path}")
-
-        # Résolution du chemin absolu depuis la racine du projet
-        # Évite les erreurs de CWD quand lancé depuis un autre répertoire
-        project_root = os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
+    def _compile_skill(self) -> DataPacket:
+        forge_logger.info(f"[{self.name}] --- DÉBUT DE LA COMPILATION DU SKILL ---")
+        
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         if os.path.isabs(self.output_dir):
             abs_output_dir = self.output_dir
         else:
             abs_output_dir = os.path.join(project_root, self.output_dir.rstrip("/"))
 
         os.makedirs(abs_output_dir, exist_ok=True)
-        forge_logger.info(f"[{self.name}] Dossier de sortie : {abs_output_dir}")
 
-        # Nom de l'adaptateur dérivé du dataset
-        dataset_stem = os.path.splitext(
-            os.path.basename(self.dataset_path)
-        )[0]
-        self.output_adapter_path = os.path.join(
-            abs_output_dir, f"{dataset_stem}_adapter.lora"
-        )
+        # 1. Lecture du dataset
+        try:
+            with open(self.dataset_path, "r", encoding="utf-8") as f:
+                raw_content = f.read()
+        except Exception as e:
+            raise RuntimeError(f"Impossible de lire le dataset : {e}")
 
-        total_steps = 5
-        simulated_losses = [2.45, 1.87, 1.32, 0.94, 0.71]
-
+        # 2. Animation de la barre de progression pour l'IHM (Simulation du formatage)
+        total_steps = 4
+        steps_info = ["Analyse du texte...", "Nettoyage des données...", "Structuration de la base de connaissances...", "Génération du fichier .skill..."]
+        
         for i in range(total_steps):
-            time.sleep(0.4)
-            loss = simulated_losses[i]
-            forge_logger.info(
-                f"[{self.name}] Étape {i + 1}/{total_steps} — loss={loss:.4f}"
-            )
+            time.sleep(0.5) # Simule le temps de traitement
+            forge_logger.info(f"[{self.name}] Étape {i + 1}/{total_steps} — {steps_info[i]}")
             if self._progress_callback:
-                self._progress_callback(i + 1, total_steps, loss)
+                self._progress_callback(i + 1, total_steps, 0.0)
 
-        # Création physique du fichier .lora sur le disque
-        # (simulé : en production, llama.cpp écrirait le vrai fichier)
-        with open(self.output_adapter_path, "w", encoding="utf-8") as f:
-            import json
-            json.dump({
-                "neural_forge_version": "0.1.0",
-                "base_model": self.base_model_path,
-                "dataset": self.dataset_path,
-                "steps": total_steps,
-                "final_loss": simulated_losses[-1],
-                "type": "lora_adapter_simulated",
-            }, f, indent=2, ensure_ascii=False)
+        # 3. Création du fichier .skill
+        dataset_stem = os.path.splitext(os.path.basename(self.dataset_path))[0]
+        self.output_skill_path = os.path.join(abs_output_dir, f"{dataset_stem}.skill")
 
-        forge_logger.info(
-            f"[{self.name}] ✅ Fichier créé : {self.output_adapter_path}"
-        )
+        skill_data = {
+            "neural_forge_version": "2.0",
+            "type": "rag_skill",
+            "name": dataset_stem.replace("_", " ").title(),
+            "description": f"Compétence générée automatiquement à partir de {os.path.basename(self.dataset_path)}",
+            "system_prompt": (
+                f"Tu es désormais un expert absolu sur le sujet : '{dataset_stem}'. "
+                "Utilise les connaissances factuelles ci-dessous pour répondre aux questions de l'utilisateur de manière précise. "
+                "Si la réponse ne se trouve pas dans ces connaissances, utilise ton intelligence générale mais précise-le."
+            ),
+            "knowledge_base": raw_content[:15000] # On limite à ~15k caractères par sécurité
+        }
+
+        with open(self.output_skill_path, "w", encoding="utf-8") as f:
+            json.dump(skill_data, f, indent=2, ensure_ascii=False)
+
+        forge_logger.info(f"[{self.name}] ✅ Compétence forgée avec succès : {self.output_skill_path}")
 
         return DataPacket(
             DataType.TEXT,
-            self.output_adapter_path,
+            self.output_skill_path,
             metadata={
-                "base_model": self.base_model_path,
-                "dataset": self.dataset_path,
-                "steps": total_steps,
-                "final_loss": simulated_losses[-1],
+                "type": "skill",
+                "skill_name": skill_data["name"]
             },
             source=self.name,
         )

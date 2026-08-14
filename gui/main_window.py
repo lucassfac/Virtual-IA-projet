@@ -333,32 +333,32 @@ class MainWindow(QMainWindow):
     # ── Auto-load ─────────────────────────────────────────────────────
 
     def _auto_load_last_model(self):
-        model_path, lora_path = load_last_model()
+        model_path, skill_path = load_last_model()
         if not model_path or not os.path.exists(model_path):
             return
         self.settings_tab.model_picker.set_path(model_path)
-        if lora_path and os.path.exists(lora_path):
-            self.settings_tab.lora_picker.set_path(lora_path)
+        if skill_path and os.path.exists(skill_path):
+            self.settings_tab.skill_picker.set_path(skill_path)
         self.settings_tab._load()
         name = os.path.basename(model_path)
-        lora = f" + {os.path.basename(lora_path)}" if lora_path else ""
-        self._sb_lbl.setText(f"Chargement auto : {name}{lora}…")
+        skill_text = f" + {os.path.basename(skill_path)}" if skill_path else ""
+        self._sb_lbl.setText(f"Chargement auto : {name}{skill_text}…")
 
     # ── Slots ─────────────────────────────────────────────────────────
 
     @pyqtSlot(str, str)
-    def _on_model_loaded(self, model_path: str, lora_path: str):
+    def _on_model_loaded(self, model_path: str, skill_path: str):
         name = os.path.basename(model_path)
-        lora = f" + {os.path.basename(lora_path)}" if lora_path else ""
+        skill_text = f" + {os.path.basename(skill_path)}" if skill_path else ""
         self._sb_dot_color("#30D158")
-        self._sb_lbl.setText(f"{name}{lora}")
+        self._sb_lbl.setText(f"{name}{skill_text}")
         self._sidebar_model_lbl.setText(f"● {name}")
         self._sidebar_model_lbl.setStyleSheet(
             "color:#30D158;font-size:10px;background:transparent;padding:0 4px;"
         )
-        self.chat_tab.on_model_loaded(model_path, lora_path)
+        self.chat_tab.on_model_loaded(model_path, skill_path)
         self.models_tab.refresh_installed()
-        save_last_model(model_path, lora_path)
+        save_last_model(model_path, skill_path)
 
     @pyqtSlot(float, float, float, float, str)
     def _on_stats(self, cpu: float, ram: float, ram_used: float, ram_total: float, gpu: str):

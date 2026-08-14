@@ -1,6 +1,5 @@
 """
 settings_tab.py — Onglet Paramètres.
-Inclut la gestion du token HuggingFace pour les modèles protégés (Gemma, LLaMA…).
 """
 
 import os
@@ -9,39 +8,32 @@ from PyQt6.QtWidgets import (
     QPushButton, QSpinBox, QLineEdit, QFrame, QButtonGroup, QRadioButton,
 )
 from PyQt6.QtCore import pyqtSignal, Qt
-from gui.workers import ModelLoadWorker
 from gui.widgets import FilePickerRow
 from core.model_manager import save_hf_token, load_hf_token, clear_hf_token
 from core.utils.hardware_check import get_hw
 
-
-
 def _open_url(url: str) -> None:
-    """Ouvre une URL dans le navigateur — compatible WSL, Windows natif, Linux."""
     import subprocess, sys, os
     try:
         if sys.platform == "win32":
             os.startfile(url)
         elif "microsoft" in open("/proc/version").read().lower():
-            # WSL → délègue à explorer.exe Windows
             subprocess.Popen(["explorer.exe", url])
         else:
             subprocess.Popen(["xdg-open", url])
     except Exception:
         pass
 
-
 class SettingsTab(QWidget):
 
-    model_loaded        = pyqtSignal(str, str)   # LLM chargé
-    vision_model_loaded = pyqtSignal(str, str)   # LLaVA chargé (model, mmproj)
+    model_loaded        = pyqtSignal(str, str)   # (model_path, skill_path)
+    vision_model_loaded = pyqtSignal(str, str)
 
     def __init__(self, llm_node, vision_node=None, parent=None):
         super().__init__(parent)
         self.llm_node    = llm_node
         self.vision_node = vision_node
         self._worker     = None
-        self._vision_worker = None
         self._build_ui()
 
     def _build_ui(self):
@@ -67,7 +59,6 @@ class SettingsTab(QWidget):
         hl = QVBoxLayout(hf_card)
         hl.setContentsMargins(20, 20, 20, 20)
         hl.setSpacing(10)
-
         hl.addWidget(self._lbl("Token d'accès  (requis pour Gemma, LLaMA officiel…)"))
 
         token_row = QHBoxLayout()
@@ -76,7 +67,6 @@ class SettingsTab(QWidget):
         self._token_input.setPlaceholderText("hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
         self._token_input.setEchoMode(QLineEdit.EchoMode.Password)
         self._token_input.setFixedHeight(42)
-        # Charger le token sauvegardé
         saved = load_hf_token()
         if saved:
             self._token_input.setText(saved)
@@ -99,39 +89,26 @@ class SettingsTab(QWidget):
         save_btn = QPushButton("Sauvegarder")
         save_btn.setObjectName("primaryBtn")
         save_btn.setFixedHeight(36)
-        save_btn.setStyleSheet(
-            "QPushButton#primaryBtn{font-size:12px;min-height:36px;border-radius:9px;}"
-        )
+        save_btn.setStyleSheet("QPushButton#primaryBtn{font-size:12px;min-height:36px;border-radius:9px;}")
         save_btn.clicked.connect(self._save_token)
         token_btns.addWidget(save_btn)
 
         clear_btn = QPushButton("Effacer")
         clear_btn.setObjectName("dangerBtn")
         clear_btn.setFixedHeight(36)
-        clear_btn.setStyleSheet(
-            "QPushButton#dangerBtn{font-size:12px;min-height:36px;border-radius:9px;}"
-        )
+        clear_btn.setStyleSheet("QPushButton#dangerBtn{font-size:12px;min-height:36px;border-radius:9px;}")
         clear_btn.clicked.connect(self._clear_token)
         token_btns.addWidget(clear_btn)
         token_btns.addStretch()
-
         hl.addLayout(token_btns)
 
         self._token_status = QLabel("")
-        self._token_status.setStyleSheet(
-            "color:#636366;font-size:11px;background:transparent;"
-        )
+        self._token_status.setStyleSheet("color:#636366;font-size:11px;background:transparent;")
         hl.addWidget(self._token_status)
 
-        # Lien d'aide — compatible WSL et Windows natif
         help_btn = QPushButton("Créer un token sur huggingface.co →")
-        help_btn.setStyleSheet(
-            "background:transparent;border:none;"
-            "color:#409CFF;font-size:11px;text-align:left;padding:0;"
-        )
-        help_btn.setCursor(__import__('PyQt6.QtGui', fromlist=['QCursor']).QCursor(
-            __import__('PyQt6.QtCore', fromlist=['Qt']).Qt.CursorShape.PointingHandCursor
-        ))
+        help_btn.setStyleSheet("background:transparent;border:none;color:#409CFF;font-size:11px;text-align:left;padding:0;")
+        help_btn.setCursor(__import__('PyQt6.QtGui', fromlist=['QCursor']).QCursor(__import__('PyQt6.QtCore', fromlist=['Qt']).Qt.CursorShape.PointingHandCursor))
         help_btn.clicked.connect(lambda: _open_url("https://huggingface.co/settings/tokens"))
         hl.addWidget(help_btn)
 
@@ -146,7 +123,7 @@ class SettingsTab(QWidget):
         root.addSpacing(20)
 
         # ── Card : Modèle ──
-        root.addWidget(self._section("MODÈLE"))
+        root.addWidget(self._section("MODÈLE ET COMPÉTENCE"))
         root.addSpacing(10)
 
         model_card = self._card()
@@ -160,20 +137,20 @@ class SettingsTab(QWidget):
             icon="🧠",
             filters="Modèles GGUF (*.gguf);;Tous (*)",
             dialog_title="Choisir un modèle",
-            start_dir="models/",
+            start_dir="storage/models/",
         )
         cl.addWidget(self.model_picker)
 
         cl.addSpacing(4)
-        cl.addWidget(self._lbl("Adaptateur LoRA  (optionnel)"))
-        self.lora_picker = FilePickerRow(
-            placeholder="Laissez vide pour le modèle de base…",
-            icon="🧬",
-            filters="Adaptateurs LoRA (*.lora *.bin);;Tous (*)",
-            dialog_title="Choisir un adaptateur LoRA",
-            start_dir="models/",
+        cl.addWidget(self._lbl("Équiper une Compétence  (.skill — optionnel)"))
+        self.skill_picker = FilePickerRow(
+            placeholder="Laissez vide pour le comportement par défaut…",
+            icon="📚",
+            filters="Compétences Neural Forge (*.skill);;Tous (*)",
+            dialog_title="Choisir une Compétence",
+            start_dir="storage/models/",
         )
-        cl.addWidget(self.lora_picker)
+        cl.addWidget(self.skill_picker)
         root.addWidget(model_card)
         root.addSpacing(20)
 
@@ -191,7 +168,6 @@ class SettingsTab(QWidget):
         mode_row.setSpacing(16)
 
         self._mode_group = QButtonGroup(self)
-
         self._radio_standard = QRadioButton("  Standard")
         self._radio_standard.setChecked(True)
         self._radio_standard.setStyleSheet(
@@ -216,10 +192,8 @@ class SettingsTab(QWidget):
         self._mode_group.addButton(self._radio_turbo, 1)
         mode_row.addWidget(self._radio_turbo)
         mode_row.addStretch()
-
         ml.addLayout(mode_row)
 
-        # Info RAM
         ram_color = "#30D158" if hw.turbo_eligible else "#FF9F0A"
         hw_info = QLabel(
             f"RAM : {hw.ram_total_gb} Go  ·  "
@@ -229,7 +203,6 @@ class SettingsTab(QWidget):
         hw_info.setStyleSheet(f"color:{ram_color};font-size:11px;background:transparent;")
         ml.addWidget(hw_info)
 
-        # Draft model (visible uniquement si Turbo possible)
         if hw.turbo_eligible:
             ml.addWidget(self._lbl("Modèle draft pour Turbo  (.gguf — modèle plus petit)"))
             self.draft_picker = FilePickerRow(
@@ -237,14 +210,12 @@ class SettingsTab(QWidget):
                 icon="⚡",
                 filters="Modèles GGUF (*.gguf);;Tous (*)",
                 dialog_title="Choisir un modèle draft (petit)",
-                start_dir="models/",
+                start_dir="storage/models/",
             )
             ml.addWidget(self.draft_picker)
         else:
             self.draft_picker = None
-            locked_lbl = QLabel(
-                f"Turbo verrouillé — {12 - hw.ram_total_gb:.1f} Go RAM supplémentaires requis."
-            )
+            locked_lbl = QLabel(f"Turbo verrouillé — {12 - hw.ram_total_gb:.1f} Go RAM supplémentaires requis.")
             locked_lbl.setStyleSheet("color:#3A3A3C;font-size:11px;background:transparent;")
             ml.addWidget(locked_lbl)
 
@@ -266,7 +237,7 @@ class SettingsTab(QWidget):
             icon="👁",
             filters="Modèles GGUF (*.gguf);;Tous (*)",
             dialog_title="Choisir un modèle LLaVA",
-            start_dir="models/",
+            start_dir="storage/models/",
         )
         vl.addWidget(self.llava_picker)
 
@@ -277,17 +248,14 @@ class SettingsTab(QWidget):
             icon="🔮",
             filters="Projecteur mmproj (*.gguf);;Tous (*)",
             dialog_title="Choisir le fichier mmproj",
-            start_dir="models/",
+            start_dir="storage/models/",
         )
         vl.addWidget(self.mmproj_picker)
 
-        # Bouton charger LLaVA
         self._load_vision_btn = QPushButton("  Charger le modèle Vision")
         self._load_vision_btn.setObjectName("primaryBtn")
         self._load_vision_btn.setFixedHeight(40)
-        self._load_vision_btn.setStyleSheet(
-            "QPushButton#primaryBtn{font-size:13px;min-height:40px;border-radius:10px;}"
-        )
+        self._load_vision_btn.setStyleSheet("QPushButton#primaryBtn{font-size:13px;min-height:40px;border-radius:10px;}")
         self._load_vision_btn.clicked.connect(self._load_vision)
         vl.addWidget(self._load_vision_btn)
 
@@ -309,10 +277,8 @@ class SettingsTab(QWidget):
         il.setSpacing(24)
 
         for label, attr, lo, hi, val, step, tip in [
-            ("Contexte (tokens)", "ctx_spin", 512, 32768, 2048, 512,
-             "Mémoire à court terme du modèle"),
-            ("Réponse max (tokens)", "max_tok_spin", 50, 4096, 200, 50,
-             "Longueur maximale de la réponse"),
+            ("Contexte (tokens)", "ctx_spin", 512, 32768, 4096, 512, "Mémoire à court terme du modèle"),
+            ("Réponse max (tokens)", "max_tok_spin", 50, 4096, 1024, 50, "Longueur maximale de la réponse"),
         ]:
             col = QVBoxLayout()
             col.setSpacing(6)
@@ -329,7 +295,7 @@ class SettingsTab(QWidget):
         root.addWidget(inf_card)
         root.addSpacing(28)
 
-        # ── Bouton charger ──
+        # ── Boutons ──
         self.load_btn = QPushButton("  Charger le modèle")
         self.load_btn.setObjectName("primaryBtn")
         self.load_btn.setFixedHeight(46)
@@ -367,37 +333,24 @@ class SettingsTab(QWidget):
         root.addWidget(st_card)
         root.addStretch()
 
-    # ── Token ─────────────────────────────────────────────────────────
-
     def _toggle_visibility(self, checked: bool):
-        self._token_input.setEchoMode(
-            QLineEdit.EchoMode.Normal if checked
-            else QLineEdit.EchoMode.Password
-        )
+        self._token_input.setEchoMode(QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
 
     def _save_token(self):
         token = self._token_input.text().strip()
         if not token:
             self._token_status.setText("⚠ Token vide")
-            self._token_status.setStyleSheet(
-                "color:#FF9F0A;font-size:11px;background:transparent;"
-            )
+            self._token_status.setStyleSheet("color:#FF9F0A;font-size:11px;background:transparent;")
             return
         save_hf_token(token)
-        self._token_status.setText("✓ Token sauvegardé — modèles Gemma/LLaMA débloqués")
-        self._token_status.setStyleSheet(
-            "color:#30D158;font-size:11px;background:transparent;"
-        )
+        self._token_status.setText("✓ Token sauvegardé")
+        self._token_status.setStyleSheet("color:#30D158;font-size:11px;background:transparent;")
 
     def _clear_token(self):
         clear_hf_token()
         self._token_input.clear()
         self._token_status.setText("Token supprimé")
-        self._token_status.setStyleSheet(
-            "color:#636366;font-size:11px;background:transparent;"
-        )
-
-    # ── Chargement modèle ─────────────────────────────────────────────
+        self._token_status.setStyleSheet("color:#636366;font-size:11px;background:transparent;")
 
     def _load(self):
         model_path = self.model_picker.get_path()
@@ -405,7 +358,7 @@ class SettingsTab(QWidget):
             self._dot_color("#FF453A")
             self._st_text.setText("Sélectionnez un fichier modèle")
             return
-        lora_path  = self.lora_picker.get_path() or None
+        skill_path  = self.skill_picker.get_path() or None
         turbo      = self._radio_turbo.isChecked()
         draft_path = (self.draft_picker.get_path() or None) if self.draft_picker else None
 
@@ -423,14 +376,14 @@ class SettingsTab(QWidget):
             success  = pS(str)
             error    = pS(str)
             finished = pS()
-            def __init__(self_, node, mp, lp, dp, t):
+            def __init__(self_, node, mp, sp, dp, t):
                 super().__init__()
-                self_.node=node; self_.mp=mp; self_.lp=lp
+                self_.node=node; self_.mp=mp; self_.sp=sp
                 self_.dp=dp; self_.t=t
             def run(self_):
                 try:
                     self_.node.load_model(
-                        self_.mp, lora_path=self_.lp,
+                        self_.mp, skill_path=self_.sp,
                         draft_model_path=self_.dp, turbo=self_.t
                     )
                     self_.success.emit(self_.mp)
@@ -439,9 +392,7 @@ class SettingsTab(QWidget):
                 finally:
                     self_.finished.emit()
 
-        self._worker = TurboLoadWorker(
-            self.llm_node, model_path, lora_path, draft_path, turbo
-        )
+        self._worker = TurboLoadWorker(self.llm_node, model_path, skill_path, draft_path, turbo)
         self._worker.success.connect(self._ok)
         self._worker.error.connect(self._err)
         self._worker.finished.connect(lambda: (
@@ -451,106 +402,39 @@ class SettingsTab(QWidget):
         self._worker.start()
 
     def _load_vision(self):
-        """Charge le modèle LLaVA + mmproj dans le VisionNode."""
-        if self.vision_node is None:
-            self._vision_status.setText("VisionNode non disponible.")
-            return
+        """Valide et sauvegarde les chemins Vision pour l'Orchestrateur sans saturer la VRAM."""
         llava_path  = self.llava_picker.get_path()
         mmproj_path = self.mmproj_picker.get_path()
-        if not llava_path:
-            self._vision_status.setText("⚠ Sélectionnez un modèle LLaVA.")
-            self._vision_status.setStyleSheet("color:#FF9F0A;font-size:11px;background:transparent;")
-            return
-        if not mmproj_path:
-            self._vision_status.setText("⚠ Sélectionnez le fichier mmproj.")
+
+        if not llava_path or not mmproj_path:
+            self._vision_status.setText("⚠ Sélectionnez le modèle et le mmproj.")
             self._vision_status.setStyleSheet("color:#FF9F0A;font-size:11px;background:transparent;")
             return
 
-        self._load_vision_btn.setEnabled(False)
-        self._load_vision_btn.setText("  Chargement Vision…")
-        self._vision_status.setText("Chargement en cours…")
-        self._vision_status.setStyleSheet("color:#636366;font-size:11px;background:transparent;")
-
-        from gui.workers import ModelLoadWorker
-
-        class VisionLoadWorker(ModelLoadWorker):
-            def run(self_w):
-                try:
-                    self_w.llm_node.load_model(self_w.model_path, self_w.lora_path)
-                    self_w.success.emit(self_w.model_path)
-                except Exception as e:
-                    self_w.error.emit(str(e))
-                finally:
-                    self_w.finished.emit()
-
-        # On réutilise ModelLoadWorker mais sur vision_node
-        from gui.workers import ModelLoadWorker as MLW
-        from PyQt6.QtCore import QThread
-        from PyQt6.QtCore import pyqtSignal as pS
-
-        class VisionWorkerLoad(QThread):
-            success  = pS(str)
-            error    = pS(str)
-            finished = pS()
-            def __init__(self_, vnode, mp, mmp):
-                super().__init__()
-                self_.vnode = vnode; self_.mp = mp; self_.mmp = mmp
-            def run(self_):
-                try:
-                    self_.vnode.load_model(self_.mp, self_.mmp)
-                    self_.success.emit(self_.mp)
-                except Exception as e:
-                    self_.error.emit(str(e))
-                finally:
-                    self_.finished.emit()
-
-        self._vision_worker = VisionWorkerLoad(self.vision_node, llava_path, mmproj_path)
-        self._vision_worker.success.connect(self._vision_ok)
-        self._vision_worker.error.connect(self._vision_err)
-        self._vision_worker.finished.connect(lambda: (
-            self._load_vision_btn.setEnabled(True),
-            self._load_vision_btn.setText("  Charger le modèle Vision"),
-        ))
-        self._vision_worker.start()
-
-    def _vision_ok(self, path: str):
         import os
-        name = os.path.basename(path)
-        self._vision_status.setText(f"✓ LLaVA prêt : {name}")
-        self._vision_status.setStyleSheet("color:#30D158;font-size:11px;background:transparent;")
-        mmproj = self.mmproj_picker.get_path()
-        self.vision_model_loaded.emit(path, mmproj)
+        if not os.path.exists(llava_path) or not os.path.exists(mmproj_path):
+            self._vision_status.setText("⚠ Fichier introuvable sur le disque.")
+            self._vision_status.setStyleSheet("color:#FF453A;font-size:11px;background:transparent;")
+            return
 
-    def _vision_err(self, msg: str):
-        if "Failed to load model" in msg or "clip" in msg.lower():
-            friendly = (
-                "Echec LLaVA. Verifiez :\n"
-                "1. Le mmproj doit correspondre exactement au modele LLaVA.\n"
-                "   Pour llava-v1.6-mistral-7b : fichier mmproj-model-f16.gguf\n"
-                "   (repo : cjpais/llava-1.6-mistral-7b-gguf sur HuggingFace)\n"
-                "2. Reinstaller llama-cpp-python avec support vision :\n"
-                "   pip uninstall llama-cpp-python -y\n"
-                '   CMAKE_ARGS="-DLLAVA_BUILD=ON" pip install llama-cpp-python --no-cache-dir'
-            )
-        else:
-            friendly = msg[:200]
-        self._vision_status.setText(friendly)
-        self._vision_status.setStyleSheet(
-            "color:#FF453A;font-size:11px;background:transparent;"
-        )
+        # VRAIE MAGIE : Plus aucune trace de QThread ou de load_model() ici !
+        from core.session_manager import save_vision_model
+        save_vision_model(llava_path, mmproj_path)
+
+        name = os.path.basename(llava_path)
+        self._vision_status.setText(f"✓ Configuration prête pour l'Orchestrateur : {name}")
+        self._vision_status.setStyleSheet("color:#30D158;font-size:11px;background:transparent;")
+        self.vision_model_loaded.emit(llava_path, mmproj_path)
 
     def _ok(self, model_path):
-        lora = self.lora_picker.get_path()
+        skill = self.skill_picker.get_path()
         name = os.path.basename(model_path)
-        lora_info = f"LoRA : {os.path.basename(lora)}" if lora else "Sans LoRA"
+        skill_info = f"Skill : {os.path.basename(skill)}" if skill else "Aucun Skill"
         self._dot_color("#30D158")
         self._st_text.setText(name)
-        self._st_detail.setText(
-            f"Contexte : {self.ctx_spin.value()} t  ·  "
-            f"Max : {self.max_tok_spin.value()} t  ·  {lora_info}"
-        )
+        self._st_detail.setText(f"Contexte : {self.ctx_spin.value()} t  ·  Max : {self.max_tok_spin.value()} t  ·  {skill_info}")
         self._st_detail.show()
-        self.model_loaded.emit(model_path, lora or "")
+        self.model_loaded.emit(model_path, skill or "")
 
     def _err(self, msg):
         self._dot_color("#FF453A")
@@ -558,21 +442,11 @@ class SettingsTab(QWidget):
         self._st_detail.setText(msg)
         self._st_detail.show()
 
-    # ── Helpers ───────────────────────────────────────────────────────
-
     def _section(self, t):
         l = QLabel(t); l.setObjectName("sectionLabel"); return l
-
     def _lbl(self, t):
-        l = QLabel(t)
-        l.setStyleSheet("color:#636366;font-size:12px;background:transparent;")
-        return l
-
+        l = QLabel(t); l.setStyleSheet("color:#636366;font-size:12px;background:transparent;"); return l
     def _card(self):
         w = QWidget(); w.setObjectName("card"); return w
-
     def _dot_color(self, c):
-        self._dot.setStyleSheet(
-            f"background-color:{c};border-radius:5px;"
-            "min-width:10px;max-width:10px;min-height:10px;max-height:10px;"
-        )
+        self._dot.setStyleSheet(f"background-color:{c};border-radius:5px;min-width:10px;max-width:10px;min-height:10px;max-height:10px;")
