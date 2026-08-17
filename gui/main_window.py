@@ -1,6 +1,6 @@
 """
 main_window.py — Fenêtre principale Neural Forge.
-Sidebar collapsible avec animation + auto-load du dernier modèle.
+Sidebar collapsible avec animation + auto-load de l'architecture complète.
 """
 
 import os
@@ -16,7 +16,7 @@ from PyQt6.QtCore import (
 
 from core.nodes.llm_node import LLMNode
 from core.nodes.vision_node import VisionNode
-from core.session_manager import load_last_model, save_last_model
+from core.session_manager import load_last_model, save_last_model, load_vision_model
 
 from gui.tabs.chat_tab import ChatTab
 from gui.tabs.models_tab import ModelsTab
@@ -64,7 +64,10 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._switch(0)
-        QTimer.singleShot(600, self._auto_load_last_model)
+        self._restore_last_configuration()
+        
+        # Délai court pour laisser l'interface s'afficher avant de charger les poids en RAM
+        # QTimer.singleShot(600, self._auto_load_last_model)
 
     # ------------------------------------------------------------------
     def _build_ui(self):
@@ -205,7 +208,7 @@ class MainWindow(QMainWindow):
         self._vsep.setMaximumWidth(0)
         self._sidebar_open = False
         self._animating = False
-        # Bouton flottant dans le header du chat (pas par-dessus tout)
+        
         self._open_btn = QPushButton("☰")
         self._open_btn.setParent(self.stack)
         self._open_btn.setFixedSize(30, 30)
@@ -299,19 +302,36 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(sep3)
 
         hw = get_profile()
-        self._perf_badge = QLabel(hw.badge_text)
+        
+        # --- LOGIQUE UI RAPATRIÉE DU CORE ---
+        if hw.cuda_ok:
+            badge_text  = f"CUDA  {hw.gpu_vram_gb}Go VRAM"
+            badge_color = "#30D158"
+        elif hw.vulkan_ok:
+            badge_text  = f"Vulkan  {hw.gpu_vendor.upper()}"
+            badge_color = "#FF9F0A"
+        elif hw.gpu_vendor != "none":
+            badge_text  = f"GPU  {hw.gpu_name[:20]}"
+            badge_color = "#FF9F0A"
+        else:
+            badge_text  = f"CPU only  {hw.ram_total_gb:.0f}Go RAM"
+            badge_color = "#636366"
+        # ------------------------------------
+
+        self._perf_badge = QLabel(badge_text)
         self._perf_badge.setStyleSheet(
-            f"color:{hw.badge_color};font-size:10px;"
+            f"color:{badge_color};font-size:10px;"
             "font-weight:600;letter-spacing:0.5px;"
         )
+        # Mise à jour des variables aplaties (hw.gpu_name au lieu de hw.gpu.name)
         self._perf_badge.setToolTip(
             f"RAM : {hw.ram_total_gb} Go  ·  "
             f"CPU : {hw.cpu_cores_phys} cœurs  ·  "
-            f"GPU : {hw.gpu.name}\n"
+            f"GPU : {hw.gpu_name}\n"
             f"n_threads={hw.n_threads}  n_ctx={hw.n_ctx}  "
             f"n_batch={hw.n_batch}  "
             f"flash_attn={'oui' if hw.flash_attn else 'non'}\n"
-            f"CUDA : {'oui ✓' if hw.gpu.cuda_ok else 'non — recompiler llama-cpp'}"
+            f"CUDA : {'oui ✓' if hw.cuda_ok else 'non — recompiler llama-cpp'}"
         )
         sb.addPermanentWidget(self._perf_badge)
 
@@ -330,19 +350,31 @@ class MainWindow(QMainWindow):
             get_models_dir()
             self.models_tab.refresh_installed()
 
-    # ── Auto-load ─────────────────────────────────────────────────────
+    # ── Restauration de la configuration (Légère) ─────────────────────
 
-    def _auto_load_last_model(self):
+    def _restore_last_configuration(self):
+        """Restaure les chemins de la dernière session dans l'UI sans charger la VRAM."""
         model_path, skill_path = load_last_model()
-        if not model_path or not os.path.exists(model_path):
+
+        if not model_path:
             return
-        self.settings_tab.model_picker.set_path(model_path)
+
+        # 1. Pré-remplir l'UI pour le modèle principal
+        if os.path.exists(model_path):
+            self.settings_tab.model_picker.set_path(model_path)
         if skill_path and os.path.exists(skill_path):
             self.settings_tab.skill_picker.set_path(skill_path)
-        self.settings_tab._load()
+
+        # 2. Pré-remplir l'UI pour l'Expert Visuel
+        v_model, v_proj = load_vision_model()
+        if v_model and os.path.exists(v_model):
+            self.settings_tab.vision_model_picker.set_path(v_model)
+        if v_proj and os.path.exists(v_proj):
+            self.settings_tab.vision_mmproj_picker.set_path(v_proj)
+
+        # 3. Notification passive (Pas de chargement en RAM/VRAM)
         name = os.path.basename(model_path)
-        skill_text = f" + {os.path.basename(skill_path)}" if skill_path else ""
-        self._sb_lbl.setText(f"Chargement auto : {name}{skill_text}…")
+        self._sb_lbl.setText(f"Configuration restaurée : {name} (Prêt à charger)")
 
     # ── Slots ─────────────────────────────────────────────────────────
 
@@ -365,9 +397,11 @@ class MainWindow(QMainWindow):
         cpu_c = "#30D158" if cpu < 50 else "#FF9F0A" if cpu < 80 else "#FF453A"
         self._cpu_lbl.setText(f"CPU {cpu:.0f}%")
         self._cpu_lbl.setStyleSheet(f"color:{cpu_c};font-size:11px;min-width:58px;")
+        
         ram_c = "#30D158" if ram < 60 else "#FF9F0A" if ram < 85 else "#FF453A"
         self._ram_lbl.setText(f"RAM {ram:.0f}%  {ram_used:.1f}/{ram_total:.0f}Go")
         self._ram_lbl.setStyleSheet(f"color:{ram_c};font-size:11px;min-width:110px;margin-left:8px;")
+        
         self._gpu_lbl.setText(f"  ·  {gpu}" if gpu else "")
 
     def _sb_dot_color(self, c: str):

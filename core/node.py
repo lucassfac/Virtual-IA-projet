@@ -51,7 +51,6 @@ class BaseNode:
     ACCEPTED_TYPES: Tuple[DataType, ...] = (
         DataType.TEXT,
         DataType.IMAGE_PATH,
-        DataType.AUDIO_PATH,
         DataType.ANY,
     )
 
@@ -148,6 +147,29 @@ class BaseNode:
         )
 
     # ------------------------------------------------------------------
+    # Capacités du Nœud (Propriétés pour le Routeur)
+    # ------------------------------------------------------------------
+
+    @property
+    def is_loaded(self) -> bool:
+        """Retourne l'état de chargement du modèle."""
+        return self.model_loaded
+
+    @property
+    def is_multimodal(self) -> bool:
+        """
+        Vérifie si le modèle possède des capacités visuelles actives.
+        Ne retourne True que si un projecteur visuel (.mmproj) est explicitement chargé.
+        """
+        if not self.model_loaded:
+            return False
+
+        proj = getattr(self, "mmproj_path", "")
+        if proj and isinstance(proj, str) and proj.strip() != "":
+            return True
+
+        return False
+    # ------------------------------------------------------------------
     # Utilitaires pour l'IHM
     # ------------------------------------------------------------------
 
@@ -160,6 +182,7 @@ class BaseNode:
             "has_input": self.input_packet is not None,
             "has_output": self.output_packet is not None,
             "accepted_types": [t.value for t in self.ACCEPTED_TYPES],
+            "is_multimodal": self.is_multimodal,
         }
 
     def reset(self) -> None:

@@ -1,11 +1,5 @@
 """
-model_manager.py — Gestionnaire de modèles locaux pour Neural Forge.
-
-Fonctions :
-  - Recherche de modèles GGUF sur HuggingFace Hub (API publique, sans token)
-  - Téléchargement avec progression (callback)
-  - Inventaire des modèles installés localement
-  - Suppression de modèles
+model_manager.py — Gestionnaire de modèles locaux et réseau.
 """
 
 import json
@@ -13,32 +7,14 @@ import os
 import urllib.request
 import urllib.parse
 from typing import Callable, List, Optional
+from core.session_manager import load_hf_token, _PROJECT_ROOT
 
-# Fichier de config local (non versionné)
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_CONFIG_FILE  = os.path.join(_PROJECT_ROOT, ".neural_forge_config.json")
-
-# Modification vers le nouveau dossier de stockage
 DEFAULT_MODELS_DIR = os.path.join(_PROJECT_ROOT, "storage", "models")
-
-
-def get_project_root() -> str:
-    """Retourne le chemin absolu de la racine du projet (où se trouve app.py)."""
-    return _PROJECT_ROOT
-
-
-def get_models_dir() -> str:
-    """Retourne le chemin absolu du dossier models/."""
-    path = os.path.join(_PROJECT_ROOT, "models")
-    os.makedirs(path, exist_ok=True)
-    return path
-
 
 # ── Constantes ────────────────────────────────────────────────────────
 HF_API_MODELS = "https://huggingface.co/api/models"
 HF_API_FILES  = "https://huggingface.co/api/models/{repo_id}"
 HF_CDN        = "https://huggingface.co/{repo_id}/resolve/main/{filename}"
-
 
 # Modèles mis en avant (suggestions rapides)
 FEATURED_MODELS = [
@@ -124,6 +100,19 @@ FEATURED_MODELS = [
     },
 ]
 
+def get_models_dir() -> str:
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(current_dir, ".."))
+    models_dir = os.path.join(project_root, "storage", "models")
+    os.makedirs(models_dir, exist_ok=True)
+    return models_dir
+
+def _auth_headers(token: str = "") -> dict:
+    headers = {"User-Agent": "NeuralForge/0.1"}
+    t = token or load_hf_token()
+    if t:
+        headers["Authorization"] = f"Bearer {t}"
+    return headers
 
 # ── Exceptions ────────────────────────────────────────────────────────
 
@@ -134,65 +123,14 @@ class SearchError(Exception):
     pass
 
 
-
-# ── Persistance du token HuggingFace ─────────────────────────────────
-
-def save_hf_token(token: str) -> None:
-    """Sauvegarde le token HuggingFace dans le fichier de config local."""
-    config = _load_config()
-    config["hf_token"] = token.strip()
-    with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
-
-
-def load_hf_token() -> str:
-    """Retourne le token HuggingFace sauvegardé, ou chaîne vide."""
-    return _load_config().get("hf_token", "")
-
-
-def clear_hf_token() -> None:
-    """Supprime le token sauvegardé."""
-    config = _load_config()
-    config.pop("hf_token", None)
-    with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
-
-
-def _load_config() -> dict:
-    if os.path.exists(_CONFIG_FILE):
-        try:
-            with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-def _auth_headers(token: str = "") -> dict:
-    """Headers HTTP avec Authorization si token fourni."""
-    headers = {"User-Agent": "NeuralForge/0.1"}
-    t = token or load_hf_token()
-    if t:
-        headers["Authorization"] = f"Bearer {t}"
-    return headers
-
-
 # ── Recherche HuggingFace ─────────────────────────────────────────────
 
 def search_models(query: str, limit: int = 20) -> List[dict]:
-    """
-    Recherche des modèles GGUF sur HuggingFace.
-    Retourne une liste de dicts avec : name, repo_id, description, downloads, tags.
-    """
     params = urllib.parse.urlencode({
-        "search": query,
-        "filter": "gguf",
-        "limit": limit,
-        "sort": "downloads",
-        "direction": -1,
+        "search": query, "filter": "gguf", "limit": limit,
+        "sort": "downloads", "direction": -1,
     })
     url = f"{HF_API_MODELS}?{params}"
-
     try:
         req = urllib.request.Request(url, headers=_auth_headers())
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -200,26 +138,17 @@ def search_models(query: str, limit: int = 20) -> List[dict]:
     except Exception as e:
         raise SearchError(f"Erreur réseau : {e}")
 
-    results = []
-    for item in data:
-        repo_id = item.get("id", "")
-        tags = item.get("tags", [])
-        results.append({
-            "name": repo_id.split("/")[-1],
-            "repo_id": repo_id,
-            "description": item.get("description") or "Pas de description",
-            "downloads": item.get("downloads", 0),
-            "likes": item.get("likes", 0),
-            "tags": tags,
-            "private": item.get("private", False),
-        })
-    return results
-
+    return [{
+        "name": item.get("id", "").split("/")[-1],
+        "repo_id": item.get("id", ""),
+        "description": item.get("description") or "Pas de description",
+        "downloads": item.get("downloads", 0),
+        "likes": item.get("likes", 0),
+        "tags": item.get("tags", []),
+        "private": item.get("private", False),
+    } for item in data]
 
 def get_repo_gguf_files(repo_id: str) -> List[dict]:
-    """
-    Retourne la liste des fichiers .gguf disponibles dans un repo HuggingFace.
-    """
     url = HF_API_FILES.format(repo_id=repo_id)
     try:
         req = urllib.request.Request(url, headers=_auth_headers())
@@ -228,17 +157,12 @@ def get_repo_gguf_files(repo_id: str) -> List[dict]:
     except Exception as e:
         raise SearchError(f"Impossible de récupérer les fichiers de {repo_id} : {e}")
 
-    siblings = data.get("siblings", [])
-    files = []
-    for s in siblings:
-        fname = s.get("rfilename", "")
-        if fname.lower().endswith(".gguf"):
-            files.append({
-                "filename": fname,
-                "size": s.get("size", 0),
-                "size_gb": round(s.get("size", 0) / 1024**3, 2),
-            })
-    return sorted(files, key=lambda x: x["filename"])
+    return sorted([{
+        "filename": s.get("rfilename", ""),
+        "size": s.get("size", 0),
+        "size_gb": round(s.get("size", 0) / 1024**3, 2),
+    } for s in data.get("siblings", []) if s.get("rfilename", "").lower().endswith(".gguf")], 
+    key=lambda x: x["filename"])
 
 
 # ── Téléchargement ────────────────────────────────────────────────────

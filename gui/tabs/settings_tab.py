@@ -1,32 +1,25 @@
 """
 settings_tab.py — Onglet Paramètres.
+Architecture révisée : Import matériel corrigé, encapsulation OOP, délégation des Threads.
 """
 
 import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QSpinBox, QLineEdit, QFrame, QButtonGroup, QRadioButton,
+    QPushButton, QSpinBox, QLineEdit, QFrame, QButtonGroup, 
+    QRadioButton, QCheckBox, QMessageBox
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 from gui.widgets import FilePickerRow
-from core.model_manager import save_hf_token, load_hf_token, clear_hf_token
-from core.utils.hardware_check import get_hw
+from core.session_manager import save_hf_token, load_hf_token, clear_hf_token
+from core.utils.hardware import get_profile  # <-- CORRECTION DE L'IMPORT MATÉRIEL
+from core.session_manager import save_vision_model, save_last_model
+from gui.workers import ModelLoadWorker      # <-- UTILISATION DU WORKER CENTRALISÉ
 
-def _open_url(url: str) -> None:
-    import subprocess, sys, os
-    try:
-        if sys.platform == "win32":
-            os.startfile(url)
-        elif "microsoft" in open("/proc/version").read().lower():
-            subprocess.Popen(["explorer.exe", url])
-        else:
-            subprocess.Popen(["xdg-open", url])
-    except Exception:
-        pass
 
 class SettingsTab(QWidget):
 
-    model_loaded        = pyqtSignal(str, str)   # (model_path, skill_path)
+    model_loaded        = pyqtSignal(str, str)
     vision_model_loaded = pyqtSignal(str, str)
 
     def __init__(self, llm_node, vision_node=None, parent=None):
@@ -35,6 +28,39 @@ class SettingsTab(QWidget):
         self.vision_node = vision_node
         self._worker     = None
         self._build_ui()
+
+    def _check_hardware_limits(self, model_path: str, mmproj_path: str) -> bool:
+        """Vérifie si le modèle sélectionné risque de faire crasher la carte graphique (VRAM)."""
+        hw = get_profile()
+        vram_dispo = getattr(hw, "gpu_vram_gb", 0)
+
+        # Si pas de GPU détecté, on laisse passer (fallback CPU assuré par llama-cpp)
+        if vram_dispo <= 0:
+            return True
+
+        taille_modele = os.path.getsize(model_path) / (1024**3) if model_path and os.path.exists(model_path) else 0
+        taille_proj = os.path.getsize(mmproj_path) / (1024**3) if mmproj_path and os.path.exists(mmproj_path) else 0
+
+        # Marge pour le KV Cache
+        besoin_estime = taille_modele + taille_proj + 1.5
+
+        if besoin_estime > vram_dispo:
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("⚠️ Risque de saturation VRAM")
+            msg.setText("Ce modèle semble trop lourd pour votre carte graphique.")
+            msg.setInformativeText(
+                f"• Besoin estimé : ~<b>{besoin_estime:.1f} Go</b> (Modèle + Contexte)<br>"
+                f"• VRAM disponible : <b>{vram_dispo:.1f} Go</b><br><br>"
+                "Si vous continuez, l'application risque de crasher (Out of Memory) "
+                "lors du traitement d'une image.<br><br>"
+                "Forcer le chargement à vos risques et périls ?"
+            )
+            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Abort)
+            msg.setDefaultButton(QMessageBox.StandardButton.Abort)
+            return msg.exec() == QMessageBox.StandardButton.Yes
+            
+        return True
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -46,20 +72,19 @@ class SettingsTab(QWidget):
         title.setObjectName("pageTitle")
         root.addWidget(title)
         root.addSpacing(4)
-        sub = QLabel("Configuration du modèle et de l'inférence")
+        sub = QLabel("Configuration de l'Architecture (Composite AI)")
         sub.setObjectName("pageSubtitle")
         root.addWidget(sub)
         root.addSpacing(32)
 
-        # ── Card : Token HuggingFace ──
+        # ── Card : Compte HuggingFace ──
         root.addWidget(self._section("COMPTE HUGGINGFACE"))
         root.addSpacing(10)
-
         hf_card = self._card()
         hl = QVBoxLayout(hf_card)
         hl.setContentsMargins(20, 20, 20, 20)
         hl.setSpacing(10)
-        hl.addWidget(self._lbl("Token d'accès  (requis pour Gemma, LLaMA officiel…)"))
+        hl.addWidget(self._lbl("Token d'accès (requis pour Gemma, LLaMA officiel…)"))
 
         token_row = QHBoxLayout()
         token_row.setSpacing(8)
@@ -74,10 +99,7 @@ class SettingsTab(QWidget):
 
         self._show_btn = QPushButton("👁")
         self._show_btn.setFixedSize(42, 42)
-        self._show_btn.setStyleSheet(
-            "background:rgba(255,255,255,0.07);border:none;"
-            "border-radius:10px;font-size:15px;color:#8E8E93;"
-        )
+        self._show_btn.setStyleSheet("background:rgba(255,255,255,0.07);border:none;border-radius:10px;color:#8E8E93;")
         self._show_btn.setCheckable(True)
         self._show_btn.toggled.connect(self._toggle_visibility)
         token_row.addWidget(self._show_btn)
@@ -85,18 +107,15 @@ class SettingsTab(QWidget):
 
         token_btns = QHBoxLayout()
         token_btns.setSpacing(8)
-
         save_btn = QPushButton("Sauvegarder")
         save_btn.setObjectName("primaryBtn")
         save_btn.setFixedHeight(36)
-        save_btn.setStyleSheet("QPushButton#primaryBtn{font-size:12px;min-height:36px;border-radius:9px;}")
         save_btn.clicked.connect(self._save_token)
         token_btns.addWidget(save_btn)
 
         clear_btn = QPushButton("Effacer")
         clear_btn.setObjectName("dangerBtn")
         clear_btn.setFixedHeight(36)
-        clear_btn.setStyleSheet("QPushButton#dangerBtn{font-size:12px;min-height:36px;border-radius:9px;}")
         clear_btn.clicked.connect(self._clear_token)
         token_btns.addWidget(clear_btn)
         token_btns.addStretch()
@@ -105,189 +124,146 @@ class SettingsTab(QWidget):
         self._token_status = QLabel("")
         self._token_status.setStyleSheet("color:#636366;font-size:11px;background:transparent;")
         hl.addWidget(self._token_status)
-
-        help_btn = QPushButton("Créer un token sur huggingface.co →")
-        help_btn.setStyleSheet("background:transparent;border:none;color:#409CFF;font-size:11px;text-align:left;padding:0;")
-        help_btn.setCursor(__import__('PyQt6.QtGui', fromlist=['QCursor']).QCursor(__import__('PyQt6.QtCore', fromlist=['Qt']).Qt.CursorShape.PointingHandCursor))
-        help_btn.clicked.connect(lambda: _open_url("https://huggingface.co/settings/tokens"))
-        hl.addWidget(help_btn)
-
         root.addWidget(hf_card)
         root.addSpacing(20)
 
-        # ── Séparateur ──
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("background:rgba(255,255,255,0.06);max-height:1px;border:none;")
-        root.addWidget(sep)
-        root.addSpacing(20)
-
-        # ── Card : Modèle ──
-        root.addWidget(self._section("MODÈLE ET COMPÉTENCE"))
+        # ── Card : Modèle Principal ──
+        root.addWidget(self._section("MOTEUR PRINCIPAL (Texte ou Multimodal)"))
         root.addSpacing(10)
-
         model_card = self._card()
         cl = QVBoxLayout(model_card)
         cl.setContentsMargins(20, 20, 20, 20)
         cl.setSpacing(10)
 
-        cl.addWidget(self._lbl("Fichier modèle  (.gguf)"))
+        cl.addWidget(self._lbl("Fichier modèle (.gguf)"))
         self.model_picker = FilePickerRow(
-            placeholder="Sélectionnez un modèle GGUF…",
+            placeholder="Sélectionnez un modèle GGUF (ex: Gemma, Mistral, Qwen-VL)…",
             icon="🧠",
             filters="Modèles GGUF (*.gguf);;Tous (*)",
-            dialog_title="Choisir un modèle",
-            start_dir="storage/models/",
+            dialog_title="Choisir un modèle principal",
         )
         cl.addWidget(self.model_picker)
 
         cl.addSpacing(4)
-        cl.addWidget(self._lbl("Équiper une Compétence  (.skill — optionnel)"))
+        cl.addWidget(self._lbl("Projecteur multimodal principal (.mmproj — Optionnel)"))
+        self.main_mmproj_picker = FilePickerRow(
+            placeholder="Laissez vide si le modèle principal est purement textuel…",
+            icon="🔮",
+            filters="Projecteur mmproj (*.gguf);;Tous (*)",
+            dialog_title="Choisir le projecteur principal",
+        )
+        cl.addWidget(self.main_mmproj_picker)
+
+        cl.addSpacing(4)
+        cl.addWidget(self._lbl("Équiper une Compétence (.skill — Optionnel)"))
         self.skill_picker = FilePickerRow(
             placeholder="Laissez vide pour le comportement par défaut…",
             icon="📚",
-            filters="Compétences Neural Forge (*.skill);;Tous (*)",
+            filters="Compétences (*.skill);;Tous (*)",
             dialog_title="Choisir une Compétence",
-            start_dir="storage/models/",
         )
         cl.addWidget(self.skill_picker)
         root.addWidget(model_card)
         root.addSpacing(20)
 
-        # ── Card : Mode d'inférence ──
-        root.addWidget(self._section("MODE D'INFÉRENCE"))
+        # ── Card : Orchestrateur Visuel ──
+        root.addWidget(self._section("ORCHESTRATEUR VISUEL (Expert Dédié)"))
         root.addSpacing(10)
+        vision_card = self._card()
+        vl = QVBoxLayout(vision_card)
+        vl.setContentsMargins(20, 20, 20, 20)
+        vl.setSpacing(10)
 
+        vl.addWidget(self._lbl("Modèle Vision Poids-Plume (.gguf)"))
+        self.vision_model_picker = FilePickerRow(
+            placeholder="Ex: moondream2-q8_0.gguf",
+            icon="👁",
+            filters="Modèles GGUF (*.gguf);;Tous (*)",
+            dialog_title="Choisir le modèle Expert Vision",
+        )
+        vl.addWidget(self.vision_model_picker)
+
+        vl.addSpacing(4)
+        vl.addWidget(self._lbl("Projecteur Vision (.mmproj)"))
+        self.vision_mmproj_picker = FilePickerRow(
+            placeholder="Ex: moondream2-mmproj-f16.gguf",
+            icon="🔮",
+            filters="Projecteur mmproj (*.gguf);;Tous (*)",
+            dialog_title="Choisir le projecteur Expert Vision",
+        )
+        vl.addWidget(self.vision_mmproj_picker)
+
+        vl.addSpacing(10)
+        self.checkbox_force_orch = QCheckBox(" Forcer l'Orchestration Composite (OCR + VLM + LLM)")
+        self.checkbox_force_orch.setStyleSheet("color:#F2F2F7; font-size:12px; background:transparent;")
+        vl.addWidget(self.checkbox_force_orch)
+
+        root.addWidget(vision_card)
+        root.addSpacing(20)
+
+        # ── Card : Mode d'inférence ──
+        root.addWidget(self._section("MODE D'INFÉRENCE & MATÉRIEL"))
+        root.addSpacing(10)
         mode_card = self._card()
         ml = QVBoxLayout(mode_card)
         ml.setContentsMargins(20, 18, 20, 18)
         ml.setSpacing(12)
 
-        hw = get_hw()
+        hw = get_profile()
         mode_row = QHBoxLayout()
         mode_row.setSpacing(16)
 
         self._mode_group = QButtonGroup(self)
         self._radio_standard = QRadioButton("  Standard")
         self._radio_standard.setChecked(True)
-        self._radio_standard.setStyleSheet(
-            "QRadioButton{color:#F2F2F7;font-size:13px;background:transparent;}"
-            "QRadioButton::indicator{width:16px;height:16px;}"
-            "QRadioButton::indicator:checked{background:#0A84FF;border-radius:8px;border:2px solid #0A84FF;}"
-            "QRadioButton::indicator:unchecked{background:transparent;border-radius:8px;border:2px solid #3A3A3C;}"
-        )
+        self._radio_standard.setStyleSheet("QRadioButton{color:#F2F2F7;font-size:13px;background:transparent;}")
         self._mode_group.addButton(self._radio_standard, 0)
         mode_row.addWidget(self._radio_standard)
 
         self._radio_turbo = QRadioButton("  Turbo  ⚡")
         self._radio_turbo.setEnabled(hw.turbo_eligible)
-        self._radio_turbo.setToolTip(hw.turbo_reason)
-        turbo_color = "#F2F2F7" if hw.turbo_eligible else "#3A3A3C"
-        self._radio_turbo.setStyleSheet(
-            f"QRadioButton{{color:{turbo_color};font-size:13px;background:transparent;}}"
-            "QRadioButton::indicator{width:16px;height:16px;}"
-            "QRadioButton::indicator:checked{background:#FF9F0A;border-radius:8px;border:2px solid #FF9F0A;}"
-            "QRadioButton::indicator:unchecked{background:transparent;border-radius:8px;border:2px solid #3A3A3C;}"
-        )
+        self._radio_turbo.setStyleSheet(f"QRadioButton{{color:{'#F2F2F7' if hw.turbo_eligible else '#3A3A3C'};font-size:13px;background:transparent;}}")
         self._mode_group.addButton(self._radio_turbo, 1)
         mode_row.addWidget(self._radio_turbo)
         mode_row.addStretch()
         ml.addLayout(mode_row)
 
-        ram_color = "#30D158" if hw.turbo_eligible else "#FF9F0A"
-        hw_info = QLabel(
-            f"RAM : {hw.ram_total_gb} Go  ·  "
-            f"GPU : {hw.gpu_name}  ({hw.gpu_vram_gb} Go VRAM)  ·  "
-            f"CPU : {hw.cpu_cores_phys} cœurs physiques"
-        )
-        hw_info.setStyleSheet(f"color:{ram_color};font-size:11px;background:transparent;")
+        hw_info = QLabel(f"RAM : {hw.ram_total_gb} Go  ·  GPU : {hw.gpu_name} ({hw.gpu_vram_gb} Go)  ·  CPU : {hw.cpu_cores_phys} cœurs")
+        hw_info.setStyleSheet(f"color:{'#30D158' if hw.turbo_eligible else '#FF9F0A'};font-size:11px;background:transparent;")
         ml.addWidget(hw_info)
 
         if hw.turbo_eligible:
-            ml.addWidget(self._lbl("Modèle draft pour Turbo  (.gguf — modèle plus petit)"))
+            ml.addWidget(self._lbl("Modèle draft pour Turbo (.gguf)"))
             self.draft_picker = FilePickerRow(
-                placeholder="Ex : tinyllama.gguf, gemma-3-1b.gguf…",
+                placeholder="Ex : tinyllama.gguf...",
                 icon="⚡",
                 filters="Modèles GGUF (*.gguf);;Tous (*)",
-                dialog_title="Choisir un modèle draft (petit)",
-                start_dir="storage/models/",
             )
             ml.addWidget(self.draft_picker)
         else:
             self.draft_picker = None
-            locked_lbl = QLabel(f"Turbo verrouillé — {12 - hw.ram_total_gb:.1f} Go RAM supplémentaires requis.")
-            locked_lbl.setStyleSheet("color:#3A3A3C;font-size:11px;background:transparent;")
-            ml.addWidget(locked_lbl)
 
         root.addWidget(mode_card)
         root.addSpacing(20)
 
-        # ── Card : Vision (LLaVA) ──
-        root.addWidget(self._section("VISION  (MULTIMODAL)"))
+        # ── Card : Inférence (Contexte/Tokens) ──
+        root.addWidget(self._section("PARAMÈTRES D'INFÉRENCE"))
         root.addSpacing(10)
-
-        vision_card = self._card()
-        vl = QVBoxLayout(vision_card)
-        vl.setContentsMargins(20, 20, 20, 20)
-        vl.setSpacing(10)
-
-        vl.addWidget(self._lbl("Modèle LLaVA  (.gguf)"))
-        self.llava_picker = FilePickerRow(
-            placeholder="Sélectionnez un modèle LLaVA…",
-            icon="👁",
-            filters="Modèles GGUF (*.gguf);;Tous (*)",
-            dialog_title="Choisir un modèle LLaVA",
-            start_dir="storage/models/",
-        )
-        vl.addWidget(self.llava_picker)
-
-        vl.addSpacing(4)
-        vl.addWidget(self._lbl("Projecteur multimodal  (mmproj .gguf)"))
-        self.mmproj_picker = FilePickerRow(
-            placeholder="Sélectionnez le fichier mmproj…",
-            icon="🔮",
-            filters="Projecteur mmproj (*.gguf);;Tous (*)",
-            dialog_title="Choisir le fichier mmproj",
-            start_dir="storage/models/",
-        )
-        vl.addWidget(self.mmproj_picker)
-
-        self._load_vision_btn = QPushButton("  Charger le modèle Vision")
-        self._load_vision_btn.setObjectName("primaryBtn")
-        self._load_vision_btn.setFixedHeight(40)
-        self._load_vision_btn.setStyleSheet("QPushButton#primaryBtn{font-size:13px;min-height:40px;border-radius:10px;}")
-        self._load_vision_btn.clicked.connect(self._load_vision)
-        vl.addWidget(self._load_vision_btn)
-
-        self._vision_status = QLabel("")
-        self._vision_status.setObjectName("sectionLabel")
-        self._vision_status.setWordWrap(True)
-        vl.addWidget(self._vision_status)
-
-        root.addWidget(vision_card)
-        root.addSpacing(20)
-
-        # ── Card : Inférence ──
-        root.addWidget(self._section("INFÉRENCE"))
-        root.addSpacing(10)
-
         inf_card = self._card()
         il = QHBoxLayout(inf_card)
         il.setContentsMargins(20, 18, 20, 18)
         il.setSpacing(24)
 
-        for label, attr, lo, hi, val, step, tip in [
-            ("Contexte (tokens)", "ctx_spin", 512, 32768, 4096, 512, "Mémoire à court terme du modèle"),
-            ("Réponse max (tokens)", "max_tok_spin", 50, 4096, 1024, 50, "Longueur maximale de la réponse"),
+        for label, attr, lo, hi, val, step in [
+            ("Contexte (tokens)", "ctx_spin", 512, 32768, 4096, 512),
+            ("Réponse max (tokens)", "max_tok_spin", 50, 4096, 1024, 50),
         ]:
             col = QVBoxLayout()
-            col.setSpacing(6)
             col.addWidget(self._lbl(label))
             spin = QSpinBox()
             spin.setRange(lo, hi)
             spin.setValue(val)
             spin.setSingleStep(step)
-            spin.setToolTip(tip)
             setattr(self, attr, spin)
             col.addWidget(spin)
             il.addLayout(col)
@@ -295,29 +271,46 @@ class SettingsTab(QWidget):
         root.addWidget(inf_card)
         root.addSpacing(28)
 
-        # ── Boutons ──
-        self.load_btn = QPushButton("  Charger le modèle")
-        self.load_btn.setObjectName("primaryBtn")
-        self.load_btn.setFixedHeight(46)
-        self.load_btn.clicked.connect(self._load)
-        root.addWidget(self.load_btn)
+        # ── BOUTONS D'ACTION ──
+        text_btn_row = QHBoxLayout()
+        text_btn_row.setSpacing(12)
+
+        self.btn_load_architecture = QPushButton("🚀 CHARGER L'ARCHITECTURE")
+        self.btn_load_architecture.setObjectName("primaryBtn")
+        self.btn_load_architecture.setFixedHeight(50)
+        self.btn_load_architecture.setStyleSheet("""
+            QPushButton#primaryBtn {
+                font-size: 14px; font-weight: bold; border-radius: 8px;
+                background-color: #0D6EFD; color: white;
+            }
+            QPushButton#primaryBtn:hover { background-color: #0B5ED7; }
+        """)
+        self.btn_load_architecture.clicked.connect(self._on_load_architecture_clicked)
+        text_btn_row.addWidget(self.btn_load_architecture, stretch=1)
+
+        self.unload_btn = QPushButton("Décharger")
+        self.unload_btn.setObjectName("dangerBtn")
+        self.unload_btn.setFixedHeight(50)
+        self.unload_btn.setFixedWidth(120)
+        self.unload_btn.clicked.connect(self._unload)
+        text_btn_row.addWidget(self.unload_btn)
+
+        root.addLayout(text_btn_row)
         root.addSpacing(24)
 
-        # ── Statut modèle actif ──
-        root.addWidget(self._section("MODÈLE ACTIF"))
+        # ── Statut Modèle Actif ──
+        root.addWidget(self._section("STATUT DU SYSTÈME"))
         root.addSpacing(10)
-
         st_card = self._card()
         sl = QVBoxLayout(st_card)
         sl.setContentsMargins(20, 16, 20, 16)
-        sl.setSpacing(8)
-
+        
         dot_row = QHBoxLayout()
         self._dot = QLabel()
         self._dot.setFixedSize(10, 10)
         self._dot_color("#3A3A3C")
         dot_row.addWidget(self._dot)
-        dot_row.addSpacing(8)
+        
         self._st_text = QLabel("Aucun modèle chargé")
         self._st_text.setObjectName("pageSubtitle")
         dot_row.addWidget(self._st_text)
@@ -333,6 +326,81 @@ class SettingsTab(QWidget):
         root.addWidget(st_card)
         root.addStretch()
 
+    # ── LOGIQUE MÉTIER ──
+
+    def _on_load_architecture_clicked(self):
+        vision_model = self.vision_model_picker.get_path()
+        vision_proj  = self.vision_mmproj_picker.get_path()
+        
+        if vision_model and vision_proj:
+            save_vision_model(vision_model, vision_proj)
+            self.vision_model_loaded.emit(vision_model, vision_proj)
+        else:
+            save_vision_model("", "")
+            self.vision_model_loaded.emit("", "")
+
+        main_model = self.model_picker.get_path()
+        main_proj  = self.main_mmproj_picker.get_path()
+        skill_path = self.skill_picker.get_path()
+        draft_path = self.draft_picker.get_path() if self.draft_picker else None
+        turbo      = self._radio_turbo.isChecked()
+
+        if not main_model:
+            self._dot_color("#FF453A")
+            self._st_text.setText("Sélectionnez au moins un Fichier Modèle Principal.")
+            return
+
+        # Appel interne au Garde-Fou matériel
+        if not self._check_hardware_limits(main_model, main_proj):
+            self._dot_color("#FF9F0A")
+            self._st_text.setText("Chargement annulé par sécurité matérielle.")
+            return
+
+        self.btn_load_architecture.setEnabled(False)
+        self.btn_load_architecture.setText("🚀 Chargement en cours...")
+        self._dot_color("#FF9F0A")
+        self._st_text.setText("Démarrage des moteurs IA...")
+        self._st_detail.hide()
+
+        # Démarrage du thread centralisé
+        self._worker = ModelLoadWorker(self.llm_node, main_model, main_proj, skill_path, draft_path, turbo)
+        self._worker.success.connect(self._on_load_success)
+        self._worker.error.connect(self._on_load_error)
+        self._worker.finished.connect(lambda: (
+            self.btn_load_architecture.setEnabled(True),
+            self.btn_load_architecture.setText("🚀 CHARGER L'ARCHITECTURE"),
+        ))
+        self._worker.start()
+
+    def _on_load_success(self, model_path):
+        skill = self.skill_picker.get_path()
+        name = os.path.basename(model_path)
+        skill_info = f"Skill : {os.path.basename(skill)}" if skill else "Aucun Skill actif"
+        
+        self._dot_color("#30D158")
+        self._st_text.setText(f"Moteur Actif : {name}")
+        self._st_detail.setText(
+            f"Contexte : {self.ctx_spin.value()} tokens  ·  "
+            f"Orchestration Forcée : {'Oui' if self.checkbox_force_orch.isChecked() else 'Non'}  ·  "
+            f"{skill_info}"
+        )
+        self._st_detail.show()
+        self.model_loaded.emit(model_path, skill or "")
+
+    def _on_load_error(self, msg):
+        self._dot_color("#FF453A")
+        self._st_text.setText("Échec du chargement")
+        self._st_detail.setText(msg)
+        self._st_detail.show()
+
+    def _unload(self):
+        self.llm_node.unload_model()
+        save_last_model("", "")
+        self._dot_color("#FF453A")
+        self._st_text.setText("Système hors ligne")
+        self._st_detail.hide()
+        self.model_loaded.emit("", "")
+
     def _toggle_visibility(self, checked: bool):
         self._token_input.setEchoMode(QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
 
@@ -340,113 +408,32 @@ class SettingsTab(QWidget):
         token = self._token_input.text().strip()
         if not token:
             self._token_status.setText("⚠ Token vide")
-            self._token_status.setStyleSheet("color:#FF9F0A;font-size:11px;background:transparent;")
+            self._token_status.setStyleSheet("color:#FF9F0A;")
             return
         save_hf_token(token)
         self._token_status.setText("✓ Token sauvegardé")
-        self._token_status.setStyleSheet("color:#30D158;font-size:11px;background:transparent;")
+        self._token_status.setStyleSheet("color:#30D158;")
 
     def _clear_token(self):
         clear_hf_token()
         self._token_input.clear()
         self._token_status.setText("Token supprimé")
-        self._token_status.setStyleSheet("color:#636366;font-size:11px;background:transparent;")
+        self._token_status.setStyleSheet("color:#636366;")
 
-    def _load(self):
-        model_path = self.model_picker.get_path()
-        if not model_path:
-            self._dot_color("#FF453A")
-            self._st_text.setText("Sélectionnez un fichier modèle")
-            return
-        skill_path  = self.skill_picker.get_path() or None
-        turbo      = self._radio_turbo.isChecked()
-        draft_path = (self.draft_picker.get_path() or None) if self.draft_picker else None
+    def _section(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setObjectName("sectionLabel")
+        return lbl
 
-        self.load_btn.setEnabled(False)
-        mode_label = "TURBO ⚡" if turbo else "Standard"
-        self.load_btn.setText(f"  Chargement {mode_label}…")
-        self._dot_color("#FF9F0A")
-        self._st_text.setText(f"Chargement {mode_label}…")
-        self._st_detail.hide()
+    def _lbl(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet("color:#636366;font-size:12px;background:transparent;")
+        return lbl
 
-        from PyQt6.QtCore import QThread
-        from PyQt6.QtCore import pyqtSignal as pS
+    def _card(self) -> QWidget:
+        widget = QWidget()
+        widget.setObjectName("card")
+        return widget
 
-        class TurboLoadWorker(QThread):
-            success  = pS(str)
-            error    = pS(str)
-            finished = pS()
-            def __init__(self_, node, mp, sp, dp, t):
-                super().__init__()
-                self_.node=node; self_.mp=mp; self_.sp=sp
-                self_.dp=dp; self_.t=t
-            def run(self_):
-                try:
-                    self_.node.load_model(
-                        self_.mp, skill_path=self_.sp,
-                        draft_model_path=self_.dp, turbo=self_.t
-                    )
-                    self_.success.emit(self_.mp)
-                except Exception as e:
-                    self_.error.emit(str(e))
-                finally:
-                    self_.finished.emit()
-
-        self._worker = TurboLoadWorker(self.llm_node, model_path, skill_path, draft_path, turbo)
-        self._worker.success.connect(self._ok)
-        self._worker.error.connect(self._err)
-        self._worker.finished.connect(lambda: (
-            self.load_btn.setEnabled(True),
-            self.load_btn.setText("  Charger le modèle"),
-        ))
-        self._worker.start()
-
-    def _load_vision(self):
-        """Valide et sauvegarde les chemins Vision pour l'Orchestrateur sans saturer la VRAM."""
-        llava_path  = self.llava_picker.get_path()
-        mmproj_path = self.mmproj_picker.get_path()
-
-        if not llava_path or not mmproj_path:
-            self._vision_status.setText("⚠ Sélectionnez le modèle et le mmproj.")
-            self._vision_status.setStyleSheet("color:#FF9F0A;font-size:11px;background:transparent;")
-            return
-
-        import os
-        if not os.path.exists(llava_path) or not os.path.exists(mmproj_path):
-            self._vision_status.setText("⚠ Fichier introuvable sur le disque.")
-            self._vision_status.setStyleSheet("color:#FF453A;font-size:11px;background:transparent;")
-            return
-
-        # VRAIE MAGIE : Plus aucune trace de QThread ou de load_model() ici !
-        from core.session_manager import save_vision_model
-        save_vision_model(llava_path, mmproj_path)
-
-        name = os.path.basename(llava_path)
-        self._vision_status.setText(f"✓ Configuration prête pour l'Orchestrateur : {name}")
-        self._vision_status.setStyleSheet("color:#30D158;font-size:11px;background:transparent;")
-        self.vision_model_loaded.emit(llava_path, mmproj_path)
-
-    def _ok(self, model_path):
-        skill = self.skill_picker.get_path()
-        name = os.path.basename(model_path)
-        skill_info = f"Skill : {os.path.basename(skill)}" if skill else "Aucun Skill"
-        self._dot_color("#30D158")
-        self._st_text.setText(name)
-        self._st_detail.setText(f"Contexte : {self.ctx_spin.value()} t  ·  Max : {self.max_tok_spin.value()} t  ·  {skill_info}")
-        self._st_detail.show()
-        self.model_loaded.emit(model_path, skill or "")
-
-    def _err(self, msg):
-        self._dot_color("#FF453A")
-        self._st_text.setText("Échec du chargement")
-        self._st_detail.setText(msg)
-        self._st_detail.show()
-
-    def _section(self, t):
-        l = QLabel(t); l.setObjectName("sectionLabel"); return l
-    def _lbl(self, t):
-        l = QLabel(t); l.setStyleSheet("color:#636366;font-size:12px;background:transparent;"); return l
-    def _card(self):
-        w = QWidget(); w.setObjectName("card"); return w
-    def _dot_color(self, c):
-        self._dot.setStyleSheet(f"background-color:{c};border-radius:5px;min-width:10px;max-width:10px;min-height:10px;max-height:10px;")
+    def _dot_color(self, color: str):
+        self._dot.setStyleSheet(f"background-color:{color}; border-radius:5px; min-width:10px; max-width:10px; min-height:10px; max-height:10px;")

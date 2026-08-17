@@ -1,24 +1,10 @@
 """
-document_reader.py — Lecteur de documents pour Neural Forge.
-
-Supporte : .txt, .md, .pdf, .docx, .json, .jsonl
-
-Stratégie d'injection selon la taille :
-  ─ Court  (< THRESHOLD_CHARS)  → injection directe dans le prompt
-  ─ Long   (≥ THRESHOLD_CHARS)  → résumé automatique en deux passes :
-       1. Découpe en chunks
-       2. Chaque chunk → résumé partiel via LLMNode
-       3. Résumés concaténés → résumé final injecté
-
-Dépendances optionnelles :
-  pip install pymupdf       ← PDF
-  pip install python-docx   ← DOCX
+document_reader.py — Lecteur et formateur de documents pour Neural Forge.
 """
 
 import json
 import os
 from enum import Enum
-from typing import Optional
 
 # ── Seuils ────────────────────────────────────────────────────────────
 # Injection directe si contenu ≤ DIRECT_THRESHOLD caractères
@@ -210,6 +196,31 @@ def _extract_text(path: str) -> str:
         return _read_json(path)
     else:
         return _read_text(path)  # Tentative texte brut
+
+
+def _read_image_fast(path: str) -> str:
+    """Extraction instantanée via OCR classique (contourne LLaVA)."""
+    try:
+        import pytesseract
+        from PIL import Image
+        
+        img = Image.open(path)
+        # On force la lecture en français et en anglais
+        text = pytesseract.image_to_string(img, lang='fra+eng').strip()
+        
+        if not text:
+            raise DocumentReadError(
+                "L'OCR rapide n'a détecté aucun texte. "
+                "Le fichier nécessite une analyse visuelle profonde (LLaVA)."
+            )
+        return text
+    except ImportError:
+        raise DocumentReadError(
+            "Le module 'pytesseract' n'est pas installé. "
+            "Tapez : pip install pytesseract"
+        )
+    except Exception as e:
+        raise DocumentReadError(f"Échec de l'OCR rapide : {e}")
 
 
 def _read_text(path: str) -> str:

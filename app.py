@@ -1,16 +1,12 @@
 """
 app.py — Point d'entrée de Neural Forge.
-
-Lance l'application PyQt6 avec le thème Apple Dark.
-
-Usage :
-    python app.py
+Lance l'application PyQt6
 """
 
 import sys
 import os
 
-# Garantit que Python trouve le package 'core' et 'gui'
+# Garantit que Python trouve les packages 'core' et 'gui'
 sys.path.insert(0, os.path.dirname(__file__))
 
 from PyQt6.QtWidgets import QApplication
@@ -21,8 +17,8 @@ from gui.main_window import MainWindow
 from gui.style import QSS
 
 
-def main():
-    # ── Haute résolution (écrans HiDPI / Retina) ──
+def configure_application() -> QApplication:
+    """Configure et retourne l'instance principale de l'application PyQt."""
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
@@ -32,19 +28,21 @@ def main():
     app.setApplicationVersion("0.1.0")
     app.setOrganizationName("Neural Forge")
 
-    # ── Thème Apple Dark ──
+    # Thème et typographie
     app.setStyleSheet(QSS)
-
-    # ── Police par défaut ──
+    
     font = QFont()
     font.setFamily("SF Pro Display")
     font.setPointSize(13)
     app.setFont(font)
 
-    # ── Fenêtre principale ──
+    return app
+
+
+def main():
+    app = configure_application()
     window = MainWindow()
     window.show()
-
     sys.exit(app.exec())
 
 

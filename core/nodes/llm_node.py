@@ -1,90 +1,58 @@
 """
 llm_node.py — Moteur d'inférence haute performance Neural Forge.
-Version 4.0 : Système de "Skills" RAG dynamique (Fichiers .skill) et Fallback GPU.
+Version 4.3 : Clean Code & Centralisation des utilitaires.
 """
 
-import os
 import gc
 import json
-from typing import Generator, Optional, List, Dict
+import base64
+import mimetypes
+import os
+from typing import Generator, Optional, List, Dict, Union
 
 from core.logger import forge_logger
 from core.node import AIModelMissingError, BaseNode, ModelLoadError
 from core.types import DataPacket, DataType
 from core.utils.hardware import get_profile, HardwareProfile
+from core.utils.file_utils import check_safe_path
 
 try:
     from llama_cpp import Llama
+    from llama_cpp.llama_chat_format import Llava15ChatHandler
 except ImportError:
     Llama = None
-
-# ── Helpers chemins ───────────────────────────────────────────────────
-
-def _check_path(path: str, label: str) -> str:
-    if not path:
-        raise ModelLoadError(f"{label} : chemin vide.")
-    if not os.path.exists(path):
-        raise ModelLoadError(f"{label} introuvable : '{path}'")
-    if not os.access(path, os.R_OK):
-        raise ModelLoadError(f"{label} non lisible (permissions).")
-
-    if " " in path:
-        forge_logger.warning(f"[{label}] Espaces détectés. Création d'un symlink...")
-        return _make_space_free_path(path, label)
-    return path
-
-def _make_space_free_path(original: str, label: str) -> str:
-    try:
-        ext = os.path.splitext(original)[1]
-        safe_name = f"nf_{label.lower().replace(' ', '_')}{ext}"
-        safe_path = os.path.join("/tmp", safe_name)
-        if os.path.islink(safe_path) and os.readlink(safe_path) != original:
-            os.remove(safe_path)
-        if not os.path.exists(safe_path):
-            os.symlink(original, safe_path)
-        return safe_path
-    except Exception:
-        return original
-
-
-# ── LLMNode ───────────────────────────────────────────────────────────
+    Llava15ChatHandler = None
 
 class LLMNode(BaseNode):
-
-    ACCEPTED_TYPES = (DataType.TEXT,)
+    ACCEPTED_TYPES = (DataType.TEXT, DataType.IMAGE_PATH)
 
     def __init__(self, name: str = "LLM Generator"):
         super().__init__(name)
-        self.llm_engine:         Optional[object]          = None
-        self.draft_engine:       Optional[object]          = None
-        self.current_model_path: Optional[str]             = None
-        
-        # NOUVEAU : Variables pour les compétences (Skills)
-        self.current_skill_path: Optional[str]             = None
-        self.skill_system_prompt: str                      = ""
-        self.skill_knowledge_base: str                     = ""
-        
-        self._turbo_active:      bool                      = False
-        self.hw:                 Optional[HardwareProfile] = None
+        self.llm_engine: Optional[object] = None
+        self.draft_engine: Optional[object] = None
+        self.current_model_path: Optional[str] = None
+        self.current_skill_path: Optional[str] = None
+        self.skill_system_prompt: str = ""
+        self.skill_knowledge_base: str = ""
+        self._turbo_active: bool = False
+        self.hw: Optional[HardwareProfile] = None
+        self.conversation_history: List[Dict[str, Union[str, list]]] = []
 
-        self.conversation_history: List[Dict[str, str]]    = []
+    @property
+    def is_multimodal(self) -> bool:
+        if not self.model_loaded: return False
+        proj = getattr(self, "mmproj_path", "")
+        return bool(proj and isinstance(proj, str) and proj.strip() != "")
 
     def unload_model(self) -> None:
-        """Décharge le modèle et FORCE la destruction du contexte C++."""
-        if self.llm_engine is not None:
-            try:
-                self.llm_engine.close()
-            except Exception:
-                pass
-            del self.llm_engine
+        if self.llm_engine:
+            try: self.llm_engine.close()
+            except Exception: pass
             self.llm_engine = None
             
-        if self.draft_engine is not None:
-            try:
-                self.draft_engine.close()
-            except Exception:
-                pass
-            del self.draft_engine
+        if self.draft_engine:
+            try: self.draft_engine.close()
+            except Exception: pass
             self.draft_engine = None
             
         self.current_model_path = None
@@ -99,31 +67,20 @@ class LLMNode(BaseNode):
         self.conversation_history = []
         forge_logger.info(f"[{self.name}] Historique effacé.")
 
-    # ── Moteur Skill (RAG) ────────────────────────────────────────────
-
     def _get_skill_context(self) -> list:
-        """Prépare le prompt système si une compétence est équipée."""
         if self.skill_system_prompt and self.skill_knowledge_base:
-            forge_logger.info(f"[{self.name}] Skill actif injecté dans le contexte.")
-            return [{
-                "role": "system",
-                "content": f"{self.skill_system_prompt}\n\nBASE DE CONNAISSANCES:\n{self.skill_knowledge_base}"
-            }]
+            return [{"role": "system", "content": f"{self.skill_system_prompt}\n\nBASE DE CONNAISSANCES:\n{self.skill_knowledge_base}"}]
         return []
 
-    # ── Chargement ────────────────────────────────────────────────────
-
     def load_model(self, model_path: str, skill_path: Optional[str] = None, draft_model_path: Optional[str] = None, turbo: bool = False) -> None:
-        if Llama is None:
-            raise ModelLoadError("llama-cpp-python n'est pas installé.")
+        if Llama is None: raise ModelLoadError("llama-cpp-python n'est pas installé.")
 
         self.unload_model()
         self.hw = get_profile()
 
-        safe_model_path = _check_path(model_path, "Modèle Principal")
-        safe_draft_path = _check_path(draft_model_path, "Modèle Draft") if draft_model_path else None
+        safe_model_path = check_safe_path(model_path, "Modèle Principal")
+        safe_draft_path = check_safe_path(draft_model_path, "Modèle Draft") if draft_model_path else None
         
-        # ── Lecture du fichier .skill ──
         if skill_path and os.path.exists(skill_path):
             try:
                 with open(skill_path, "r", encoding="utf-8") as f:
@@ -132,35 +89,33 @@ class LLMNode(BaseNode):
                         self.current_skill_path = skill_path
                         self.skill_system_prompt = skill_data.get("system_prompt", "")
                         self.skill_knowledge_base = skill_data.get("knowledge_base", "")
-                        forge_logger.info(f"[{self.name}] Compétence '{skill_data.get('name')}' chargée avec succès.")
-                    else:
-                        forge_logger.warning(f"[{self.name}] Fichier skill invalide ignoré.")
             except Exception as e:
                 forge_logger.error(f"[{self.name}] Erreur de lecture du skill : {e}")
 
-        self._turbo_active = False
-        if turbo and safe_draft_path and self.hw.turbo_eligible:
-            self._turbo_active = True
+        self._turbo_active = bool(turbo and safe_draft_path and self.hw.turbo_eligible)
 
-        # Context Window à 4096 pour supporter la base de connaissances du Skill
-        kwargs = dict(
-            model_path      = safe_model_path,
-            n_ctx           = 4096, 
-            n_threads       = self.hw.n_threads,
-            n_threads_batch = self.hw.n_threads,
-            n_batch         = self.hw.n_batch,
-            n_gpu_layers    = self.hw.n_gpu_layers,
-            use_mmap        = self.hw.use_mmap,
-            logits_all      = False,
-            verbose         = False,
-        )
-        if self.hw.flash_attn:
+        kwargs = {
+            "model_path": safe_model_path, "n_ctx": 4096, 
+            "n_threads": self.hw.n_threads, "n_threads_batch": self.hw.n_threads,
+            "n_batch": self.hw.n_batch, "n_gpu_layers": 15,
+            "use_mmap": self.hw.use_mmap, "logits_all": False, "verbose": False,
+        }
+
+        if getattr(self.hw, 'flash_attn', False):
             kwargs["flash_attn"] = True
+
+        proj = getattr(self, "mmproj_path", "")
+        if proj and os.path.exists(proj) and Llava15ChatHandler is not None:
+            try:
+                kwargs["chat_handler"] = Llava15ChatHandler(clip_model_path=proj)
+                forge_logger.info(f"[{self.name}] Projecteur visuel mmproj activé.")
+            except Exception as e:
+                forge_logger.error(f"[{self.name}] Échec du chargement mmproj : {e}")
 
         try:
             self.llm_engine = Llama(**kwargs)
         except Exception as e:
-            forge_logger.warning(f"[{self.name}] Échec GPU. Fallback CPU...")
+            forge_logger.warning(f"[{self.name}] Échec GPU ({e}). Fallback CPU...")
             kwargs["n_gpu_layers"] = 0
             kwargs["n_ctx"] = 2048 
             try:
@@ -171,23 +126,39 @@ class LLMNode(BaseNode):
         self.current_model_path = model_path
         self.model_loaded = True
 
-    # ── Inférence ─────────────────────────────────────────────────────
+    def _prepare_message_content(self) -> Union[str, list]:
+        if self.input_packet.data_type == DataType.IMAGE_PATH:
+            user_text = self.input_packet.metadata.get("prompt", "Décris cette image.")
+            if not self.is_multimodal:
+                return f"[Instruction système : Vous êtes un modèle textuel pur. Informez l'utilisateur que vous ne pouvez pas voir son image.]\nRequête : {user_text}"
+
+            img_path = self.input_packet.content
+            try:
+                with open(img_path, "rb") as img_file:
+                    base64_data = base64.b64encode(img_file.read()).decode('utf-8')
+                mime_type = mimetypes.guess_type(img_path)[0] or "image/jpeg"
+                return [
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_data}"}},
+                    {"type": "text", "text": user_text}
+                ]
+            except Exception as e:
+                forge_logger.error(f"[{self.name}] Échec encodage Base64 : {e}")
+                return user_text
+        return self.input_packet.content
 
     def _run_inference(self) -> DataPacket:
-        prompt = self.input_packet.content
-        self.conversation_history.append({"role": "user", "content": prompt})
-        if len(self.conversation_history) > 10:
-            self.conversation_history = self.conversation_history[-10:]
+        if self.conversation_history and self.conversation_history[-1]["role"] == "user":
+            self.conversation_history.pop()
+
+        self.conversation_history.append({"role": "user", "content": self._prepare_message_content()})
+        self.conversation_history = self.conversation_history[-10:]
 
         forge_logger.log_node_event(self.name, "INFERENCE_START", "Génération en cours...")
-
-        # INJECTION DU SKILL
-        messages_to_send = self._get_skill_context() + self.conversation_history
-
+        
         output = self.llm_engine.create_chat_completion(
-            messages=messages_to_send,
+            messages=self._get_skill_context() + self.conversation_history,
             max_tokens=1024,
-            temperature=0.3 if self.current_skill_path else 0.7, # Température basse si un skill est actif
+            temperature=0.3 if self.current_skill_path else 0.7,
             stream=False
         )
         
@@ -198,27 +169,23 @@ class LLMNode(BaseNode):
 
     def stream_inference(self, packet: DataPacket) -> Generator[str, None, None]:
         self.set_input(packet)
-        if not self.model_loaded:
-            raise AIModelMissingError(f"[{self.name}] Aucun modèle chargé.")
+        if not self.model_loaded: raise AIModelMissingError(f"[{self.name}] Aucun modèle chargé.")
 
-        self.conversation_history.append({"role": "user", "content": self.input_packet.content})
-        if len(self.conversation_history) > 10:
-            self.conversation_history = self.conversation_history[-10:]
+        if self.conversation_history and self.conversation_history[-1]["role"] == "user":
+            self.conversation_history.pop()
 
-        # INJECTION DU SKILL
-        messages_to_send = self._get_skill_context() + self.conversation_history
+        self.conversation_history.append({"role": "user", "content": self._prepare_message_content()})
+        self.conversation_history = self.conversation_history[-10:]
 
         stream = self.llm_engine.create_chat_completion(
-            messages=messages_to_send,
-            max_tokens=1024,
-            stream=True,
+            messages=self._get_skill_context() + self.conversation_history,
+            max_tokens=1024, stream=True,
             temperature=0.3 if self.current_skill_path else 0.7,
         )
         
         full_answer = ""
         for chunk in stream:
-            delta = chunk["choices"][0].get("delta", {})
-            tok = delta.get("content", "")
+            tok = chunk["choices"][0].get("delta", {}).get("content", "")
             if tok:
                 full_answer += tok
                 yield tok
@@ -227,6 +194,5 @@ class LLMNode(BaseNode):
 
     def get_status(self) -> dict:
         base = super().get_status()
-        if self.hw:
-            base.update({"cuda_ok": self.hw.gpu.cuda_ok, "n_ctx": self.hw.n_ctx})
+        if self.hw: base.update({"cuda_ok": self.hw.cuda_ok, "n_ctx": self.hw.n_ctx})
         return base

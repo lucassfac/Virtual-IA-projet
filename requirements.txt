@@ -10,3 +10,31 @@ pytest-qt>=4.2.0
 
 # Optionnel : support GPU CUDA (décommenter si GPU disponible)
 # llama-cpp-python[cuda]>=0.2.0
+
+bottle==0.13.4
+bottle-websocket==0.2.9
+diskcache==5.6.3
+Eel==0.18.2
+future==1.0.0
+gevent==26.4.0
+gevent-websocket==0.10.1
+greenlet==3.4.0
+importlib_resources==7.1.0
+Jinja2==3.1.6
+llama_cpp_python==0.3.18
+lxml==6.1.1
+MarkupSafe==3.0.3
+numpy==2.2.6
+packaging==26.3
+pillow==12.2.0
+psutil==7.2.2
+pymupdf==1.28.2
+pyparsing==3.3.2
+PyQt6==6.11.0
+PyQt6-Qt6==6.11.0
+PyQt6_sip==13.11.1
+pytesseract==0.3.13
+python-docx==1.2.0
+typing_extensions==4.15.0
+zope.event==6.1
+zope.interface==8.4
