@@ -81,37 +81,48 @@ Virtual-IA-projet/
 
 ## 🚀 Installation & Configuration
 
+Neural Forge embarque un **orchestrateur `Makefile`** couplé à un **installateur matériel intelligent (`install.py`)** qui détecte automatiquement votre RAM, votre carte graphique (NVIDIA CUDA / architecture `sm_xx` ou CPU), initialise l'arborescence `storage/` et compile `llama-cpp-python` sur mesure.
+
 ### 1. Prérequis Système
-* **OS** : Linux (Ubuntu/Debian recommandé), macOS ou Windows.
-* **Python** : `3.10` à `3.12`.
+* **OS** : Linux (Ubuntu/Debian recommandé), macOS ou Windows (WSL2).
+* **Python** : `3.10` à `3.12` + `make` et `python3-venv`.
 * **Outils système (Optionnel pour l'OCR rapide)** :
   ```bash
-  sudo apt update && sudo apt install -y tesseract-ocr tesseract-ocr-fra tesseract-ocr-eng
+  sudo apt update && sudo apt install -y build-essential tesseract-ocr tesseract-ocr-fra tesseract-ocr-eng
   ```
 
-### 2. Environnement Virtuel & Dépendances
+### 2. Installation Automatisée (Recommandée — via Makefile)
+Une seule commande crée l'environnement virtuel `venv/`, détecte votre GPU, compile le moteur C++/CUDA et installe toutes les dépendances :
+
 ```bash
 git clone <url-du-depot>
 cd Virtual-IA-projet
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
-```
 
-### 3. Activation de l'Accélération GPU (NVIDIA CUDA)
-Pour compiler `llama-cpp-python` avec le support matériel CUDA :
+# Installation interactive intelligente (crée le venv + auto-détection CUDA / CPU)
+make install
+```
+*(Variantes non-interactives disponibles : `make install-cuda` pour forcer le support GPU NVIDIA, ou `make install-cpu` pour une installation légère CPU).*
+
+### 3. Installation Manuelle (Alternative sans Make / Windows natif)
+Si vous préférez gérer votre environnement virtuel manuellement :
+
 ```bash
-CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python --force-reinstall --no-cache-dir
+python3 -m venv venv
+source venv/bin/activate          # Sous Windows : venv\Scripts\activate
+python install.py                 # Options : --cuda, --cpu, --quiet
 ```
 
-### 4. Lancement de l'Application & des Tests
+### 4. Commandes d'Exécution & Qualité Logicielle
 ```bash
 # Lancer l'interface graphique Neural Forge
-python app.py
+make run                          # Équivalent à : ./venv/bin/python app.py
 
-# Exécuter la suite de tests unitaires avec Pytest
-pytest -v
+# Exécuter la suite complète de tests unitaires (Pytest)
+make test                         # Équivalent à : ./venv/bin/pytest -v
+
+# Nettoyer les caches Python/Pytest ou purger les modèles d'entraînement (base_hf)
+make clean
+make purge-cache
 ```
 
 ---
