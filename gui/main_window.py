@@ -1,35 +1,47 @@
 """
 main_window.py — Fenêtre principale Neural Forge.
-Sidebar collapsible avec animation + auto-load de l'architecture complète.
+Sidebar collapsible avec animation, restauration de session et fermeture sécurisée.
 """
 
 import os
-from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QLabel, QPushButton, QStackedWidget, QStatusBar,
-    QSizePolicy, QFrame, QScrollArea,
-)
 from PyQt6.QtCore import (
-    Qt, pyqtSlot, QSize, QTimer,
-    QPropertyAnimation, QEasingCurve, QParallelAnimationGroup,
+    QEasingCurve,
+    QParallelAnimationGroup,
+    QPropertyAnimation,
+    QSize,
+    Qt,
+    pyqtSlot,
+)
+from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QStackedWidget,
+    QStatusBar,
+    QVBoxLayout,
+    QWidget,
 )
 
 from core.nodes.llm_node import LLMNode
 from core.nodes.vision_node import VisionNode
-from core.session_manager import load_last_model, save_last_model, load_vision_model
-
+from core.session_manager import load_last_model, load_vision_model, save_last_model
+from core.utils.hardware import get_profile
+from gui.system_monitor import SystemMonitor
 from gui.tabs.chat_tab import ChatTab
 from gui.tabs.models_tab import ModelsTab
-from gui.tabs.training_tab import TrainingTab
 from gui.tabs.settings_tab import SettingsTab
-from gui.system_monitor import SystemMonitor
-from core.utils.hardware import get_profile
+from gui.tabs.training_tab import TrainingTab
 
 _NAV = [
-    ("Chat",         "Discuter avec l'IA"),
+    ("Chat", "Discuter avec l'IA"),
     ("Bibliothèque", "Gérer les modèles"),
     ("Entraînement", "Spécialiser un modèle"),
-    ("Paramètres",   "Configurer l'application"),
+    ("Paramètres", "Configurer l'application"),
 ]
 
 SIDEBAR_W = 182
@@ -57,17 +69,14 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(QSize(720, 500))
         self.resize(QSize(1060, 680))
 
-        self.llm_node    = LLMNode(name="LLM-Principal")
+        self.llm_node = LLMNode(name="LLM-Principal")
         self.vision_node = VisionNode(name="Vision-Principal")
         self._sidebar_open = True
-        self._animating    = False
+        self._animating = False
 
         self._build_ui()
         self._switch(0)
         self._restore_last_configuration()
-        
-        # Délai court pour laisser l'interface s'afficher avant de charger les poids en RAM
-        # QTimer.singleShot(600, self._auto_load_last_model)
 
     # ------------------------------------------------------------------
     def _build_ui(self):
@@ -94,8 +103,8 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.stack.setObjectName("contentArea")
 
-        self.chat_tab     = ChatTab(self.llm_node, self.vision_node)
-        self.models_tab   = ModelsTab()
+        self.chat_tab = ChatTab(self.llm_node, self.vision_node)
+        self.models_tab = ModelsTab()
         self.training_tab = TrainingTab()
         self.settings_tab = SettingsTab(self.llm_node, self.vision_node)
 
@@ -141,7 +150,7 @@ class MainWindow(QMainWindow):
             "background:rgba(255,255,255,0.06);color:#636366;"
             "border:none;border-radius:8px;font-size:15px;"
         )
-        toggle.setToolTip("Masquer le menu  (cliquez ☰ pour rouvrir)")
+        toggle.setToolTip("Masquer le menu (cliquez ☰ pour rouvrir)")
         toggle.clicked.connect(self._close_sidebar)
         top_row.addWidget(toggle)
         layout.addLayout(top_row)
@@ -181,7 +190,8 @@ class MainWindow(QMainWindow):
     # ── Animation sidebar ──────────────────────────────────────────────
 
     def _close_sidebar(self):
-        if self._animating: return
+        if self._animating:
+            return
         self._animating = True
 
         anim = QPropertyAnimation(self._sidebar, b"maximumWidth")
@@ -208,7 +218,7 @@ class MainWindow(QMainWindow):
         self._vsep.setMaximumWidth(0)
         self._sidebar_open = False
         self._animating = False
-        
+
         self._open_btn = QPushButton("☰")
         self._open_btn.setParent(self.stack)
         self._open_btn.setFixedSize(30, 30)
@@ -222,7 +232,8 @@ class MainWindow(QMainWindow):
         self._open_btn.clicked.connect(self._open_sidebar)
 
     def _open_sidebar(self):
-        if self._animating: return
+        if self._animating:
+            return
         self._animating = True
         if hasattr(self, "_open_btn"):
             self._open_btn.hide()
@@ -237,11 +248,13 @@ class MainWindow(QMainWindow):
         anim.setStartValue(0)
         anim.setEndValue(SIDEBAR_W)
         anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        anim.finished.connect(lambda: (
-            self._sidebar.setFixedWidth(SIDEBAR_W),
-            setattr(self, "_sidebar_open", True),
-            setattr(self, "_animating", False),
-        ))
+        anim.finished.connect(
+            lambda: (
+                self._sidebar.setFixedWidth(SIDEBAR_W),
+                setattr(self, "_sidebar_open", True),
+                setattr(self, "_animating", False),
+            )
+        )
         anim.start()
         self._anim_open = anim
 
@@ -284,7 +297,9 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._cpu_lbl)
 
         self._ram_lbl = QLabel("RAM —%")
-        self._ram_lbl.setStyleSheet("color:#48484A;font-size:11px;min-width:110px;margin-left:8px;")
+        self._ram_lbl.setStyleSheet(
+            "color:#48484A;font-size:11px;min-width:110px;margin-left:8px;"
+        )
         sb.addPermanentWidget(self._ram_lbl)
 
         self._gpu_lbl = QLabel("")
@@ -296,34 +311,28 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(sep2)
         sb.addPermanentWidget(QLabel("100% local"))
 
-        # Badge performance
         sep3 = QLabel("  ·  ")
         sep3.setStyleSheet("color:#2C2C2E;")
         sb.addPermanentWidget(sep3)
 
         hw = get_profile()
-        
-        # --- LOGIQUE UI RAPATRIÉE DU CORE ---
         if hw.cuda_ok:
-            badge_text  = f"CUDA  {hw.gpu_vram_gb}Go VRAM"
+            badge_text = f"CUDA  {hw.gpu_vram_gb}Go VRAM"
             badge_color = "#30D158"
         elif hw.vulkan_ok:
-            badge_text  = f"Vulkan  {hw.gpu_vendor.upper()}"
+            badge_text = f"Vulkan  {hw.gpu_vendor.upper()}"
             badge_color = "#FF9F0A"
         elif hw.gpu_vendor != "none":
-            badge_text  = f"GPU  {hw.gpu_name[:20]}"
+            badge_text = f"GPU  {hw.gpu_name[:20]}"
             badge_color = "#FF9F0A"
         else:
-            badge_text  = f"CPU only  {hw.ram_total_gb:.0f}Go RAM"
+            badge_text = f"CPU only  {hw.ram_total_gb:.0f}Go RAM"
             badge_color = "#636366"
-        # ------------------------------------
 
         self._perf_badge = QLabel(badge_text)
         self._perf_badge.setStyleSheet(
-            f"color:{badge_color};font-size:10px;"
-            "font-weight:600;letter-spacing:0.5px;"
+            f"color:{badge_color};font-size:10px;font-weight:600;letter-spacing:0.5px;"
         )
-        # Mise à jour des variables aplaties (hw.gpu_name au lieu de hw.gpu.name)
         self._perf_badge.setToolTip(
             f"RAM : {hw.ram_total_gb} Go  ·  "
             f"CPU : {hw.cpu_cores_phys} cœurs  ·  "
@@ -354,25 +363,28 @@ class MainWindow(QMainWindow):
 
     def _restore_last_configuration(self):
         """Restaure les chemins de la dernière session dans l'UI sans charger la VRAM."""
-        model_path, skill_path = load_last_model()
+        try:
+            model_path, skill_path, mmproj_path = load_last_model(include_mmproj=True)
+        except TypeError:
+            model_path, skill_path = load_last_model()
+            mmproj_path = ""
 
         if not model_path:
             return
 
-        # 1. Pré-remplir l'UI pour le modèle principal
         if os.path.exists(model_path):
             self.settings_tab.model_picker.set_path(model_path)
+        if mmproj_path and os.path.exists(mmproj_path):
+            self.settings_tab.main_mmproj_picker.set_path(mmproj_path)
         if skill_path and os.path.exists(skill_path):
             self.settings_tab.skill_picker.set_path(skill_path)
 
-        # 2. Pré-remplir l'UI pour l'Expert Visuel
         v_model, v_proj = load_vision_model()
         if v_model and os.path.exists(v_model):
             self.settings_tab.vision_model_picker.set_path(v_model)
         if v_proj and os.path.exists(v_proj):
             self.settings_tab.vision_mmproj_picker.set_path(v_proj)
 
-        # 3. Notification passive (Pas de chargement en RAM/VRAM)
         name = os.path.basename(model_path)
         self._sb_lbl.setText(f"Configuration restaurée : {name} (Prêt à charger)")
 
@@ -380,8 +392,21 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str, str)
     def _on_model_loaded(self, model_path: str, skill_path: str):
+        # Gestion propre du déchargement (quand model_path est vide)
+        if not model_path:
+            self._sb_dot_color("#3A3A3C")
+            self._sb_lbl.setText("Aucun modèle chargé")
+            self._sidebar_model_lbl.setText("Aucun modèle")
+            self._sidebar_model_lbl.setStyleSheet(
+                "color:#3A3A3C;font-size:10px;background:transparent;padding:0 4px;"
+            )
+            self.chat_tab.on_model_loaded("", "")
+            return
+
         name = os.path.basename(model_path)
         skill_text = f" + {os.path.basename(skill_path)}" if skill_path else ""
+        mmproj_path = self.settings_tab.main_mmproj_picker.get_path()
+
         self._sb_dot_color("#30D158")
         self._sb_lbl.setText(f"{name}{skill_text}")
         self._sidebar_model_lbl.setText(f"● {name}")
@@ -390,18 +415,22 @@ class MainWindow(QMainWindow):
         )
         self.chat_tab.on_model_loaded(model_path, skill_path)
         self.models_tab.refresh_installed()
-        save_last_model(model_path, skill_path)
+        save_last_model(model_path, skill_path, mmproj_path)
 
     @pyqtSlot(float, float, float, float, str)
-    def _on_stats(self, cpu: float, ram: float, ram_used: float, ram_total: float, gpu: str):
+    def _on_stats(
+        self, cpu: float, ram: float, ram_used: float, ram_total: float, gpu: str
+    ):
         cpu_c = "#30D158" if cpu < 50 else "#FF9F0A" if cpu < 80 else "#FF453A"
         self._cpu_lbl.setText(f"CPU {cpu:.0f}%")
         self._cpu_lbl.setStyleSheet(f"color:{cpu_c};font-size:11px;min-width:58px;")
-        
+
         ram_c = "#30D158" if ram < 60 else "#FF9F0A" if ram < 85 else "#FF453A"
         self._ram_lbl.setText(f"RAM {ram:.0f}%  {ram_used:.1f}/{ram_total:.0f}Go")
-        self._ram_lbl.setStyleSheet(f"color:{ram_c};font-size:11px;min-width:110px;margin-left:8px;")
-        
+        self._ram_lbl.setStyleSheet(
+            f"color:{ram_c};font-size:11px;min-width:110px;margin-left:8px;"
+        )
+
         self._gpu_lbl.setText(f"  ·  {gpu}" if gpu else "")
 
     def _sb_dot_color(self, c: str):
@@ -409,3 +438,15 @@ class MainWindow(QMainWindow):
             f"background-color:{c};border-radius:4px;"
             "min-width:8px;max-width:8px;min-height:8px;max-height:8px;"
         )
+
+    def closeEvent(self, event: QCloseEvent):
+        """Arrête proprement les threads et libère la VRAM à la fermeture de l'application."""
+        if hasattr(self, "_monitor"):
+            self._monitor.stop()
+        if hasattr(self, "chat_tab"):
+            self.chat_tab._stop_generation()
+        if hasattr(self, "training_tab"):
+            self.training_tab._stop()
+        self.llm_node.unload_model()
+        self.vision_node.unload_model()
+        super().closeEvent(event)

@@ -301,7 +301,7 @@ class ModelCard(QWidget):
 
         # Lancer le dialog de progression style Steam
         prog_dlg = DownloadProgressDialog(
-            repo_id, file_info, "models/", parent=self.window()
+            repo_id, file_info, get_models_dir(), parent=self.window()
         )
         result = prog_dlg.exec()
 

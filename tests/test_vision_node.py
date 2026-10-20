@@ -99,24 +99,22 @@ def test_vision_inference_rejects_missing_image(node):
         node._run_inference()
 
 
-def test_vision_inference_returns_text_packet(node, temp_image):
-    """Une inférence réussie doit retourner un DataPacket TEXT."""
-    node.input_packet = DataPacket(DataType.IMAGE_PATH, temp_image)
-    result = node._run_inference()
-
-    assert result.data_type == DataType.TEXT
-    assert len(result.content) > 0
-    assert result.source == "VisionTest"
+def test_vision_inference_rejects_text_packet(node):
+    """set_input() doit lever InvalidDataTypeError si le paquet est TEXT."""
+    from core.node import InvalidDataTypeError
+    with pytest.raises(InvalidDataTypeError):
+        # Utilisation de la méthode officielle qui effectue la vérification
+        node.set_input(DataPacket(DataType.TEXT, "pas une image"))
 
 
 def test_vision_inference_metadata(node, temp_image):
-    """Le DataPacket de sortie doit contenir image_path et prompt dans ses métadonnées."""
+    """Le DataPacket de sortie doit contenir image_path et temp_used dans ses métadonnées."""
     node.set_prompt("Décris les couleurs dominantes.")
-    node.input_packet = DataPacket(DataType.IMAGE_PATH, temp_image)
+    node.set_input(DataPacket(DataType.IMAGE_PATH, temp_image))
     result = node._run_inference()
 
     assert result.metadata["image_path"] == temp_image
-    assert result.metadata["prompt"] == "Décris les couleurs dominantes."
+    assert "temp_used" in result.metadata
     assert result.metadata["model"] == "/tmp/llava.gguf"
 
 

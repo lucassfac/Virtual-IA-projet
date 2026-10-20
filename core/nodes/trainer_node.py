@@ -1,125 +1,151 @@
 """
-trainer_node.py — Compilateur de Compétences (Skill Compiler).
-
-Transforme un dataset brut (TXT, JSONL) en un module d'expertise portable (.skill).
-Ce module sera ensuite injecté via RAG dans le LLMNode.
+trainer_node.py — Moteur d'entraînement (SFT) et de Fusion (Model Soup).
 """
 
 import os
+import re
 import time
-import json
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from core.logger import forge_logger
 from core.node import BaseNode
+from core.soup_manager import SoupManager
 from core.types import DataPacket, DataType
+
+try:
+    import torch
+    from safetensors.torch import save_file
+except ImportError:
+    torch = None
 
 
 class TrainerNode(BaseNode):
-    """
-    Usine de spécialisation : dataset brut → module d'expertise (.skill)
-    """
+    """Nœud orchestrateur pour l'entraînement d'adaptateurs (SFT) et la fusion (SOUP)."""
 
-    def __init__(self, name: str = "Skill Compiler", output_dir: str = "storage/models"):
+    ACCEPTED_TYPES = (DataType.ANY,)
+
+    def __init__(self, name: str = "Model Trainer", output_dir: str = "storage/models"):
         super().__init__(name)
-        self.dataset_path: Optional[str] = None
-        self.base_model_path: Optional[str] = None # Conservé pour compatibilité IHM
         self.output_dir = output_dir
-        self.output_skill_path: Optional[str] = None
+        self._progress_callback: Optional[Callable[[int, int, float], None]] = None
+        self.model_loaded = True  # L'entraînement gère sa propre mémoire hors inférence
 
-        self._progress_callback: Optional[Callable] = None
-        self.model_loaded = True # Pas besoin de charger de LLM pour compiler un texte
+        # Initialisation de l'arborescence propre dès l'instanciation
+        self.base_hf_dir = os.path.join(self.output_dir, "base_hf")
+        self.adapters_dir = os.path.join(self.output_dir, "adapters")
+        self.soups_dir = os.path.join(self.output_dir, "soups")
+        for folder in (self.base_hf_dir, self.adapters_dir, self.soups_dir):
+            os.makedirs(folder, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # Entrées
-    # ------------------------------------------------------------------
+    def request_abort(self) -> None:
+        """Demande l'arrêt coopératif de l'entraînement en cours."""
+        self._abort_requested = True
 
-    def set_inputs(self, dataset_packet: DataPacket, model_packet: DataPacket) -> None:
-        """
-        Reçoit le dataset depuis l'interface. 
-        (Le model_packet est ignoré dans cette version RAG, mais gardé pour l'IHM).
-        """
-        self.dataset_path = dataset_packet.content
-        self.base_model_path = model_packet.content
-        
-        forge_logger.log_node_event(self.name, "INPUTS_SET", f"dataset={self.dataset_path}")
-
-    def set_progress_callback(self, callback: Callable) -> None:
+    def set_progress_callback(self, callback: Callable[[int, int, float], None]) -> None:
         self._progress_callback = callback
 
-    # ------------------------------------------------------------------
-    # Traitement
-    # ------------------------------------------------------------------
+    def _report_progress(self, step: int, total: int, loss: float = 0.0) -> None:
+        if self._progress_callback:
+            self._progress_callback(step, total, loss)
 
-    def process(self) -> DataPacket:
-        if not self.dataset_path:
-            raise ValueError(f"[{self.name}] Aucun dataset fourni.")
+    def _run_inference(self) -> DataPacket:
+        """Point d'entrée principal appelé par process()."""
+        config = self.input_packet.content
+        if not isinstance(config, dict):
+            raise TypeError("Le TrainerNode attend un dictionnaire de configuration.")
 
-        forge_logger.log_node_event(self.name, "COMPILATION_START")
-        result = self._compile_skill()
-        forge_logger.log_node_event(self.name, "COMPILATION_END", result.content)
-        return result
+        mode = config.get("mode")
+        if mode == "soup":
+            return self._run_soup(config)
+        if mode == "sft":
+            return self._run_sft(config)
 
-    # ------------------------------------------------------------------
-    # Compilation du Skill (RAG)
-    # ------------------------------------------------------------------
+        raise ValueError(f"Mode d'entraînement inconnu : {mode}")
 
-    def _compile_skill(self) -> DataPacket:
-        forge_logger.info(f"[{self.name}] --- DÉBUT DE LA COMPILATION DU SKILL ---")
-        
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        if os.path.isabs(self.output_dir):
-            abs_output_dir = self.output_dir
-        else:
-            abs_output_dir = os.path.join(project_root, self.output_dir.rstrip("/"))
+    # ── LOGIQUE SOUP (FUSION MATHÉMATIQUE) ──
 
-        os.makedirs(abs_output_dir, exist_ok=True)
+    def _run_soup(self, config: Dict[str, Any]) -> DataPacket:
+        forge_logger.info(f"[{self.name}] --- DÉBUT DE LA FUSION MODEL SOUP ---")
+        adapters = config.get("adapters", [])
+        soup_name = config.get("soup_name", "custom_soup").strip()
 
-        # 1. Lecture du dataset
+        if len(adapters) < 2:
+            raise ValueError("La fusion SOUP nécessite au moins 2 adaptateurs (.safetensors).")
+
+        # Nettoyage du nom de fichier (KISS & Sécurité OS)
+        safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", soup_name) or "model_soup"
+        if not safe_name.endswith("_soup"):
+            safe_name = f"{safe_name}_soup"
+        output_path = os.path.join(self.soups_dir, f"{safe_name}.safetensors")
+
+        self._report_progress(1, 2, 0.0)
+
         try:
-            with open(self.dataset_path, "r", encoding="utf-8") as f:
-                raw_content = f.read()
-        except Exception as e:
-            raise RuntimeError(f"Impossible de lire le dataset : {e}")
+            final_path = SoupManager.make_soup(adapters, output_path)
+        except Exception as exc:
+            raise RuntimeError(f"Échec de la fusion SOUP : {exc}") from exc
 
-        # 2. Animation de la barre de progression pour l'IHM (Simulation du formatage)
-        total_steps = 4
-        steps_info = ["Analyse du texte...", "Nettoyage des données...", "Structuration de la base de connaissances...", "Génération du fichier .skill..."]
-        
-        for i in range(total_steps):
-            time.sleep(0.5) # Simule le temps de traitement
-            forge_logger.info(f"[{self.name}] Étape {i + 1}/{total_steps} — {steps_info[i]}")
-            if self._progress_callback:
-                self._progress_callback(i + 1, total_steps, 0.0)
-
-        # 3. Création du fichier .skill
-        dataset_stem = os.path.splitext(os.path.basename(self.dataset_path))[0]
-        self.output_skill_path = os.path.join(abs_output_dir, f"{dataset_stem}.skill")
-
-        skill_data = {
-            "neural_forge_version": "2.0",
-            "type": "rag_skill",
-            "name": dataset_stem.replace("_", " ").title(),
-            "description": f"Compétence générée automatiquement à partir de {os.path.basename(self.dataset_path)}",
-            "system_prompt": (
-                f"Tu es désormais un expert absolu sur le sujet : '{dataset_stem}'. "
-                "Utilise les connaissances factuelles ci-dessous pour répondre aux questions de l'utilisateur de manière précise. "
-                "Si la réponse ne se trouve pas dans ces connaissances, utilise ton intelligence générale mais précise-le."
-            ),
-            "knowledge_base": raw_content[:15000] # On limite à ~15k caractères par sécurité
-        }
-
-        with open(self.output_skill_path, "w", encoding="utf-8") as f:
-            json.dump(skill_data, f, indent=2, ensure_ascii=False)
-
-        forge_logger.info(f"[{self.name}] ✅ Compétence forgée avec succès : {self.output_skill_path}")
+        self._report_progress(2, 2, 0.0)
+        forge_logger.info(f"[{self.name}] Fusion terminée : {final_path}")
 
         return DataPacket(
             DataType.TEXT,
-            self.output_skill_path,
+            final_path,
+            metadata={"type": "soup_adapter", "ingredients": len(adapters)},
+            source=self.name,
+        )
+
+    # ── LOGIQUE SFT (ENTRAÎNEMENT D'ADAPTATEUR) ──
+
+    def _run_sft(self, config: Dict[str, Any]) -> DataPacket:
+        forge_logger.info(f"[{self.name}] --- DÉBUT DE L'ENTRAÎNEMENT SFT ---")
+        dataset = config.get("dataset")
+        base_model = config.get("base_model")
+        lr_str = config.get("lr", "5e-5")
+        epochs_str = config.get("epochs", "1")
+
+        if not dataset or not base_model:
+            raise ValueError("L'entraînement SFT requiert un dataset et un modèle Hugging Face.")
+
+        # Extraction propre des tags pour éviter qu'un 2e entraînement n'écrase le 1er
+        lr_tag = "2e-4" if "2e-4" in lr_str else ("1e-5" if "1e-5" in lr_str else "5e-5")
+        ep_tag = "ep3" if "3" in epochs_str else ("ep5" if "5" in epochs_str else "ep1")
+
+        # SIMULATION TEMPORAIRE (Fake Soup / UI Validation)
+        self._abort_requested = False
+        total_steps = 100
+        for step in range(1, total_steps + 1):
+            if self._abort_requested:
+                raise RuntimeError("Entraînement interrompu proprement par l'utilisateur.")
+            time.sleep(0.04)
+            loss = max(0.1, 2.0 - (step * 0.015))
+            if step % 10 == 0:
+                self._report_progress(step, total_steps, round(loss, 4))
+
+        dataset_name = os.path.splitext(os.path.basename(dataset))[0]
+        filename = f"{dataset_name}_{lr_tag}_{ep_tag}_adapter.safetensors"
+        output_path = os.path.join(self.adapters_dir, filename)
+
+        if torch is not None:
+            # Génération de vrais tenseurs pour tester la fusion SoupManager derrière
+            dummy_weights = {
+                "lora_layer_1": torch.tensor([[1.5, 2.5], [3.5, 4.5]], dtype=torch.float32),
+                "lora_layer_2": torch.tensor([0.8, 0.9], dtype=torch.float32),
+            }
+            save_file(dummy_weights, output_path)
+        else:
+            with open(output_path, "w", encoding="utf-8") as file_out:
+                file_out.write("Simulated Weights")
+
+        forge_logger.info(f"[{self.name}] Entraînement SFT terminé : {output_path}")
+
+        return DataPacket(
+            DataType.TEXT,
+            output_path,
             metadata={
-                "type": "skill",
-                "skill_name": skill_data["name"]
+                "type": "lora_adapter",
+                "dataset": dataset,
+                "base_model": base_model,
             },
             source=self.name,
         )

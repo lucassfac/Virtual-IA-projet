@@ -42,6 +42,7 @@ htmlcov/
 
 # --- NEURAL FORGE : STOCKAGE DYNAMIQUE ---
 # Ignore le contenu des dossiers de stockage pour ne pas push les données utilisateurs/modèles
+storage/sessions/*
 storage/models/*
 !storage/models/.gitkeep
 !storage/models/README.md
@@ -56,8 +57,9 @@ storage/logs/*
 !storage/logs/.gitkeep
 
 # Ignore les bases de données vectorielles locales (RAG) si créées à l'avenir
-storage/chroma_db/
-storage/vector_store/
+storage/memory/*
+storage/chroma_db/*
+storage/vector_store/*
 
 # --- FICHIERS TEMPORAIRES PROJET ---
 temp/

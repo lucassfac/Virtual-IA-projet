@@ -6,20 +6,14 @@ import json
 import os
 from enum import Enum
 
-# ── Seuils ────────────────────────────────────────────────────────────
-# Injection directe si contenu ≤ DIRECT_THRESHOLD caractères
-DIRECT_THRESHOLD = 12_000   # ~3 000 tokens, tient facilement dans n_ctx=2048
-
-# Taille max d'un chunk pour la résumé en deux passes
+DIRECT_THRESHOLD = 12_000   # ~3 000 tokens
 CHUNK_SIZE = 8_000          # ~2 000 tokens par chunk
-
-# Limite absolue de caractères injectés dans le prompt final
 MAX_INJECT_CHARS = 20_000
 
 
 class InjectionStrategy(Enum):
-    DIRECT  = "direct"   # Contenu brut injecté tel quel
-    SUMMARY = "summary"  # Résumé automatique (document trop long)
+    DIRECT = "direct"
+    SUMMARY = "summary"
 
 
 class DocumentReadError(Exception):
@@ -27,10 +21,7 @@ class DocumentReadError(Exception):
 
 
 class DocumentResult:
-    """
-    Résultat de la lecture d'un document.
-    Contient le texte prêt à être injecté et la stratégie utilisée.
-    """
+    """Résultat de la lecture d'un document prêt à être injecté."""
 
     def __init__(
         self,
@@ -39,9 +30,9 @@ class DocumentResult:
         original_chars: int,
         filename: str,
     ):
-        self.content = content                  # Texte final à injecter
-        self.strategy = strategy                # DIRECT ou SUMMARY
-        self.original_chars = original_chars    # Taille avant traitement
+        self.content = content
+        self.strategy = strategy
+        self.original_chars = original_chars
         self.filename = filename
 
     @property
@@ -49,9 +40,6 @@ class DocumentResult:
         return self.strategy == InjectionStrategy.SUMMARY
 
     def build_prompt(self, user_question: str = "") -> str:
-        """
-        Construit le prompt final à envoyer au LLM.
-        """
         if self.was_summarized:
             header = (
                 f"Voici un résumé automatique du document « {self.filename} » "
@@ -66,31 +54,15 @@ class DocumentResult:
 
         if user_question:
             return f"{header}\n\n---\nQuestion : {user_question}"
-        else:
-            return (
-                f"{header}\n\n---\n"
-                "Fais un résumé clair et structuré de ce document."
-            )
+        return f"{header}\n\n---\nFais un résumé clair et structuré de ce document."
 
-
-# ── Entrée principale ─────────────────────────────────────────────────
 
 def read_document(
     path: str,
     llm_node=None,
     direct_threshold: int = DIRECT_THRESHOLD,
 ) -> DocumentResult:
-    """
-    Lit un fichier et décide automatiquement de la stratégie :
-      - Court → DocumentResult.strategy = DIRECT
-      - Long  → si llm_node fourni : résumé en deux passes (SUMMARY)
-               sinon : troncature avec avertissement (DIRECT tronqué)
-
-    :param path:             Chemin du fichier
-    :param llm_node:         LLMNode optionnel pour la résumé automatique
-    :param direct_threshold: Seuil en caractères pour basculer en résumé
-    """
-    if not os.path.exists(path):
+    if not path or not os.path.isfile(path):
         raise DocumentReadError(f"Fichier introuvable : {path}")
 
     filename = os.path.basename(path)
@@ -98,7 +70,6 @@ def read_document(
     original_chars = len(raw)
 
     if original_chars <= direct_threshold:
-        # ── Injection directe ──
         return DocumentResult(
             content=raw,
             strategy=InjectionStrategy.DIRECT,
@@ -106,8 +77,7 @@ def read_document(
             filename=filename,
         )
 
-    # ── Document long ──
-    if llm_node is not None and llm_node.model_loaded:
+    if llm_node is not None and getattr(llm_node, "model_loaded", False):
         summary = _summarize_in_chunks(raw, llm_node, filename)
         return DocumentResult(
             content=summary,
@@ -116,7 +86,6 @@ def read_document(
             filename=filename,
         )
 
-    # Pas de LLM disponible → troncature intelligente avec avertissement
     truncated = _truncate(raw, MAX_INJECT_CHARS)
     note = (
         f"\n\n[⚠ Document tronqué : {original_chars:,} → {MAX_INJECT_CHARS:,} car. "
@@ -130,18 +99,30 @@ def read_document(
     )
 
 
-# ── Résumé en deux passes ─────────────────────────────────────────────
+def _run_stateless_llm(llm_node, prompt: str) -> str:
+    """Exécute une requête interne sans polluer conversation_history ni ChromaDB."""
+    if getattr(llm_node, "llm_engine", None) is not None:
+        output = llm_node.llm_engine.create_chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=512,
+            temperature=0.2,
+            stream=False,
+        )
+        return output["choices"][0]["message"]["content"].strip()
+
+    # Fallback compatible avec les mocks de tests unitaires (FakeLLMNode)
+    from core.types import DataPacket, DataType
+    saved_hist = list(getattr(llm_node, "conversation_history", []))
+    try:
+        llm_node.set_input(DataPacket(DataType.TEXT, prompt, source="document_reader"))
+        res = llm_node._run_inference()
+        return res.content.strip()
+    finally:
+        if hasattr(llm_node, "conversation_history"):
+            llm_node.conversation_history = saved_hist
+
 
 def _summarize_in_chunks(text: str, llm_node, filename: str) -> str:
-    """
-    Résumé automatique par chunks :
-    1. Découpe le texte en chunks de CHUNK_SIZE caractères
-    2. Résume chaque chunk séparément
-    3. Concatène les résumés partiels
-    4. Si le résultat est encore trop long → passe finale de résumé
-    """
-    from core.types import DataPacket, DataType
-
     chunks = _split_chunks(text, CHUNK_SIZE)
     partial_summaries = []
 
@@ -151,19 +132,13 @@ def _summarize_in_chunks(text: str, llm_node, filename: str) -> str:
             f"du document « {filename} » en 3-5 phrases concises :\n\n{chunk}"
         )
         try:
-            packet = DataPacket(DataType.TEXT, prompt, source="document_reader")
-            llm_node.set_input(packet)
-            result = llm_node._run_inference()
-            partial_summaries.append(f"[Partie {i + 1}]\n{result.content.strip()}")
+            summary_part = _run_stateless_llm(llm_node, prompt)
+            partial_summaries.append(f"[Partie {i + 1}]\n{summary_part}")
         except Exception:
-            # En cas d'échec sur un chunk : on garde le chunk tronqué
-            partial_summaries.append(
-                f"[Partie {i + 1}]\n{_truncate(chunk, 500)}"
-            )
+            partial_summaries.append(f"[Partie {i + 1}]\n{_truncate(chunk, 500)}")
 
     combined = "\n\n".join(partial_summaries)
 
-    # Passe finale si les résumés partiels sont encore trop longs
     if len(combined) > DIRECT_THRESHOLD and len(chunks) > 1:
         final_prompt = (
             f"Voici les résumés partiels du document « {filename} ». "
@@ -171,31 +146,24 @@ def _summarize_in_chunks(text: str, llm_node, filename: str) -> str:
             f"{combined}"
         )
         try:
-            from core.types import DataPacket, DataType
-            packet = DataPacket(DataType.TEXT, final_prompt, source="document_reader")
-            llm_node.set_input(packet)
-            result = llm_node._run_inference()
-            return result.content.strip()
+            return _run_stateless_llm(llm_node, final_prompt)
         except Exception:
             pass
 
     return combined
 
 
-# ── Extracteurs par format ────────────────────────────────────────────
-
 def _extract_text(path: str) -> str:
     ext = os.path.splitext(path)[1].lower()
     if ext in (".txt", ".md", ".rst", ".csv", ".log"):
         return _read_text(path)
-    elif ext == ".pdf":
+    if ext == ".pdf":
         return _read_pdf(path)
-    elif ext == ".docx":
+    if ext == ".docx":
         return _read_docx(path)
-    elif ext in (".json", ".jsonl"):
+    if ext in (".json", ".jsonl"):
         return _read_json(path)
-    else:
-        return _read_text(path)  # Tentative texte brut
+    return _read_text(path)
 
 
 def _read_image_fast(path: str) -> str:
@@ -203,24 +171,24 @@ def _read_image_fast(path: str) -> str:
     try:
         import pytesseract
         from PIL import Image
-        
-        img = Image.open(path)
-        # On force la lecture en français et en anglais
-        text = pytesseract.image_to_string(img, lang='fra+eng').strip()
-        
+
+        with Image.open(path) as img:
+            text = pytesseract.image_to_string(img, lang="fra+eng").strip()
+
         if not text:
             raise DocumentReadError(
                 "L'OCR rapide n'a détecté aucun texte. "
                 "Le fichier nécessite une analyse visuelle profonde (LLaVA)."
             )
         return text
-    except ImportError:
+    except ImportError as exc:
         raise DocumentReadError(
-            "Le module 'pytesseract' n'est pas installé. "
-            "Tapez : pip install pytesseract"
-        )
-    except Exception as e:
-        raise DocumentReadError(f"Échec de l'OCR rapide : {e}")
+            "Le module 'pytesseract' n'est pas installé. Tapez : pip install pytesseract"
+        ) from exc
+    except DocumentReadError:
+        raise
+    except Exception as exc:
+        raise DocumentReadError(f"Échec de l'OCR rapide : {exc}") from exc
 
 
 def _read_text(path: str) -> str:
@@ -236,51 +204,42 @@ def _read_text(path: str) -> str:
 def _read_pdf(path: str) -> str:
     try:
         import fitz
-    except ImportError:
-        raise DocumentReadError(
-            "PyMuPDF non installé — lancez : pip install pymupdf"
-        )
+    except ImportError as exc:
+        raise DocumentReadError("PyMuPDF non installé — lancez : pip install pymupdf") from exc
+
     try:
-        doc = fitz.open(path)
         pages = []
-        for i, page in enumerate(doc):
-            text = page.get_text("text").strip()
-            if text:
-                pages.append(f"[Page {i + 1}]\n{text}")
-        doc.close()
+        with fitz.open(path) as doc:
+            for i, page in enumerate(doc):
+                text = page.get_text("text").strip()
+                if text:
+                    pages.append(f"[Page {i + 1}]\n{text}")
         if not pages:
-            raise DocumentReadError(
-                "Aucun texte extractible (PDF scanné ou protégé)."
-            )
+            raise DocumentReadError("Aucun texte extractible (PDF scanné ou protégé).")
         return "\n\n".join(pages)
     except DocumentReadError:
         raise
-    except Exception as e:
-        raise DocumentReadError(f"Erreur PDF : {e}")
+    except Exception as exc:
+        raise DocumentReadError(f"Erreur PDF : {exc}") from exc
 
 
 def _read_docx(path: str) -> str:
     try:
         from docx import Document
-    except ImportError:
-        raise DocumentReadError(
-            "python-docx non installé — lancez : pip install python-docx"
-        )
+    except ImportError as exc:
+        raise DocumentReadError("python-docx non installé — lancez : pip install python-docx") from exc
+
     try:
         doc = Document(path)
-        parts = []
-        for para in doc.paragraphs:
-            if para.text.strip():
-                parts.append(para.text)
-        # Tables
+        parts = [para.text for para in doc.paragraphs if para.text.strip()]
         for table in doc.tables:
             for row in table.rows:
                 cells = [c.text.strip() for c in row.cells if c.text.strip()]
                 if cells:
                     parts.append(" | ".join(cells))
         return "\n\n".join(parts)
-    except Exception as e:
-        raise DocumentReadError(f"Erreur DOCX : {e}")
+    except Exception as exc:
+        raise DocumentReadError(f"Erreur DOCX : {exc}") from exc
 
 
 def _read_json(path: str) -> str:
@@ -299,18 +258,15 @@ def _read_json(path: str) -> str:
                     except json.JSONDecodeError:
                         lines.append(line)
             return "\n---\n".join(lines)
-        else:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return json.dumps(data, ensure_ascii=False, indent=2)
-    except Exception as e:
-        raise DocumentReadError(f"Erreur JSON : {e}")
 
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return json.dumps(data, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        raise DocumentReadError(f"Erreur JSON : {exc}") from exc
 
-# ── Utilitaires ───────────────────────────────────────────────────────
 
 def _split_chunks(text: str, chunk_size: int) -> list[str]:
-    """Découpe le texte en chunks en respectant les fins de paragraphes."""
     if len(text) <= chunk_size:
         return [text]
     chunks = []
@@ -320,11 +276,10 @@ def _split_chunks(text: str, chunk_size: int) -> list[str]:
         if end >= len(text):
             chunks.append(text[start:])
             break
-        # Cherche une coupure propre (fin de paragraphe)
         cut = text.rfind("\n\n", start, end)
-        if cut == -1 or cut <= start:
+        if cut <= start:
             cut = text.rfind("\n", start, end)
-        if cut == -1 or cut <= start:
+        if cut <= start:
             cut = end
         chunks.append(text[start:cut])
         start = cut
@@ -342,15 +297,14 @@ def _truncate(text: str, max_chars: int) -> str:
 
 
 def get_file_info(path: str) -> dict:
-    stat = os.stat(path)
-    size_kb = stat.st_size / 1024
-    ext = os.path.splitext(path)[1].lower()
+    size_kb = os.path.getsize(path) / 1024 if path and os.path.exists(path) else 0.0
+    ext = os.path.splitext(path)[1].lower() if path else ""
     label = {
         ".pdf": "PDF", ".docx": "Word", ".txt": "Texte",
         ".md": "Markdown", ".json": "JSON", ".jsonl": "JSONL",
     }.get(ext, "Fichier")
     return {
-        "name": os.path.basename(path),
+        "name": os.path.basename(path) if path else "Inconnu",
         "label": label,
         "size_kb": round(size_kb, 1),
         "ext": ext,

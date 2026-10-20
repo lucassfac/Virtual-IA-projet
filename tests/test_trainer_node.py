@@ -1,231 +1,162 @@
 """
-test_trainer_node.py — Tests unitaires pour TrainerNode.
-
-Couvre :
-  - Sécurité (dataset manquant, modèle manquant)
-  - set_inputs() : rejet des mauvais types
-  - Chemin nominal : résultat, extension, métadonnées
-  - Callback de progression : appelé à chaque étape, loss décroissante
-  - Nom de l'adaptateur dérivé du dataset
-  - reset() après entraînement
+test_trainer_node.py — Tests unitaires pour TrainerNode (SFT & Model Soup) et SoupManager.
 """
 
-import sys
 import os
-
+import sys
+from unittest.mock import patch
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from core.node import InputMissingError
 from core.nodes.trainer_node import TrainerNode
+from core.soup_manager import SoupManager
 from core.types import DataPacket, DataType
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def make_trainer(output_dir="/tmp") -> TrainerNode:
-    return TrainerNode("TestTrainer", output_dir=output_dir)
+try:
+    import torch
+    from safetensors.torch import load_file, save_file
+except ImportError:
+    torch = None
 
 
-def make_inputs():
-    return (
-        DataPacket(DataType.TEXT, "data/juridique.jsonl"),
-        DataPacket(DataType.TEXT, "models/tinyllama.gguf"),
-    )
+@pytest.fixture(autouse=True)
+def fast_sleep():
+    """Désactive time.sleep pour que la suite de tests s'exécute en quelques millisecondes."""
+    with patch("time.sleep"):
+        yield
 
 
 # ---------------------------------------------------------------------------
-# Règles de sécurité
+# Tests : Sécurité & Validation des entrées
 # ---------------------------------------------------------------------------
 
-
-def test_process_without_dataset_raises():
-    """process() sans dataset doit lever ValueError mentionnant 'dataset'."""
-    trainer = make_trainer()
-    trainer.base_model_path = "models/base.gguf"   # Modèle fourni
-    with pytest.raises(ValueError, match="dataset"):
+def test_process_without_input_raises(tmp_path):
+    """process() sans DataPacket doit lever InputMissingError."""
+    trainer = TrainerNode("TestTrainer", output_dir=str(tmp_path))
+    with pytest.raises(InputMissingError):
         trainer.process()
 
 
-def test_process_without_model_raises():
-    """process() sans modèle de base doit lever ValueError mentionnant 'modèle'."""
-    trainer = make_trainer()
-    trainer.dataset_path = "data/train.jsonl"   # Dataset fourni
-    with pytest.raises(ValueError, match="modèle"):
+def test_process_with_non_dict_raises(tmp_path):
+    """Le TrainerNode doit rejeter un contenu qui n'est pas un dictionnaire."""
+    trainer = TrainerNode("TestTrainer", output_dir=str(tmp_path))
+    trainer.set_input(DataPacket(DataType.ANY, "invalid_config"))
+    with pytest.raises(TypeError, match="dictionnaire"):
         trainer.process()
 
 
-def test_process_without_any_input_raises():
-    """process() sans rien du tout doit lever ValueError."""
-    trainer = make_trainer()
-    with pytest.raises(ValueError):
+def test_sft_missing_dataset_or_model_raises(tmp_path):
+    """Le mode SFT sans dataset ou sans modèle de base doit lever ValueError."""
+    trainer = TrainerNode("TestTrainer", output_dir=str(tmp_path))
+    trainer.set_input(DataPacket(DataType.ANY, {"mode": "sft", "dataset": ""}))
+    with pytest.raises(ValueError, match="requiert un dataset"):
         trainer.process()
 
 
 # ---------------------------------------------------------------------------
-# Validation des types dans set_inputs()
+# Tests : Entraînement SFT & Arrêt Coopératif
 # ---------------------------------------------------------------------------
 
-
-def test_set_inputs_rejects_image_dataset():
-    """set_inputs() doit rejeter un dataset de type IMAGE_PATH."""
-    trainer = make_trainer()
-    with pytest.raises(TypeError):
-        trainer.set_inputs(
-            DataPacket(DataType.IMAGE_PATH, "/img.jpg"),
-            DataPacket(DataType.TEXT, "model.gguf"),
-        )
-
-
-def test_set_inputs_rejects_image_model():
-    """set_inputs() doit rejeter un modèle de type IMAGE_PATH."""
-    trainer = make_trainer()
-    with pytest.raises(TypeError):
-        trainer.set_inputs(
-            DataPacket(DataType.TEXT, "data.jsonl"),
-            DataPacket(DataType.IMAGE_PATH, "/model.jpg"),
-        )
-
-
-# ---------------------------------------------------------------------------
-# Chemin nominal
-# ---------------------------------------------------------------------------
-
-
-def test_nominal_returns_datapacket():
-    """L'entraînement doit retourner un DataPacket TEXT."""
-    trainer = make_trainer()
-    trainer.set_inputs(*make_inputs())
+def test_sft_generates_safetensors_in_adapters_dir(tmp_path):
+    """Le mode SFT doit créer un adaptateur .safetensors nommé selon le dataset et les hyperparamètres."""
+    trainer = TrainerNode("TestTrainer", output_dir=str(tmp_path))
+    config = {
+        "mode": "sft",
+        "dataset": "storage/data/wistoria.jsonl",
+        "base_model": "Qwen/Qwen2.5-1.5B-Instruct",
+        "lr": "Taux d'apprentissage: Rapide (2e-4)",
+        "epochs": "3 Époques",
+    }
+    trainer.set_input(DataPacket(DataType.ANY, config))
     result = trainer.process()
 
-    assert result is not None
-    assert result.data_type == DataType.TEXT
+    assert result.content.endswith("wistoria_2e-4_ep3_adapter.safetensors")
+    assert os.path.exists(result.content)
+    assert result.metadata["type"] == "lora_adapter"
+    assert result.metadata["base_model"] == "Qwen/Qwen2.5-1.5B-Instruct"
 
 
-def test_nominal_output_is_lora_file():
-    """Le chemin retourné doit se terminer par .lora."""
-    trainer = make_trainer()
-    trainer.set_inputs(*make_inputs())
-    result = trainer.process()
-    assert result.content.endswith(".lora")
-
-
-def test_adapter_name_derived_from_dataset():
-    """Le nom de l'adaptateur doit contenir le nom du dataset (sans extension)."""
-    trainer = make_trainer()
-    trainer.set_inputs(
-        DataPacket(DataType.TEXT, "data/contrats_clients.jsonl"),
-        DataPacket(DataType.TEXT, "models/base.gguf"),
-    )
-    result = trainer.process()
-    assert "contrats_clients" in result.content
-
-
-def test_output_metadata_complete():
-    """Les métadonnées doivent contenir base_model, dataset, steps, final_loss."""
-    trainer = make_trainer()
-    trainer.set_inputs(*make_inputs())
-    result = trainer.process()
-
-    meta = result.metadata
-    assert "base_model" in meta
-    assert "dataset" in meta
-    assert "steps" in meta
-    assert "final_loss" in meta
-
-
-def test_output_metadata_values():
-    """Les valeurs des métadonnées doivent correspondre aux inputs."""
-    dataset_pkt = DataPacket(DataType.TEXT, "data/juridique.jsonl")
-    model_pkt = DataPacket(DataType.TEXT, "models/mistral.gguf")
-
-    trainer = make_trainer()
-    trainer.set_inputs(dataset_pkt, model_pkt)
-    result = trainer.process()
-
-    assert result.metadata["base_model"] == "models/mistral.gguf"
-    assert result.metadata["dataset"] == "data/juridique.jsonl"
-    assert result.metadata["final_loss"] < 1.0
-
-
-# ---------------------------------------------------------------------------
-# Callback de progression
-# ---------------------------------------------------------------------------
-
-
-def test_progress_callback_called_each_step():
-    """Le callback doit être appelé autant de fois qu'il y a d'étapes."""
-    steps = []
-
-    def on_progress(step, total, loss):
-        steps.append((step, total, loss))
-
-    trainer = make_trainer()
-    trainer.set_inputs(*make_inputs())
-    trainer.set_progress_callback(on_progress)
-    trainer.process()
-
-    assert len(steps) == 5   # 5 étapes simulées
-
-
-def test_progress_callback_last_step():
-    """Le dernier appel du callback doit correspondre à l'étape finale."""
+def test_sft_progress_callback_invoked(tmp_path):
+    """Le callback de progression doit être appelé 10 fois (tous les 10 pas sur 100)."""
     calls = []
-
-    trainer = make_trainer()
-    trainer.set_inputs(*make_inputs())
-    trainer.set_progress_callback(lambda s, t, l: calls.append((s, t, l)))
-    trainer.process()
-
-    last = calls[-1]
-    assert last[0] == last[1]   # step == total
-
-
-def test_progress_loss_decreasing():
-    """La loss doit décroître d'étape en étape (courbe normale)."""
-    losses = []
-
-    trainer = make_trainer()
-    trainer.set_inputs(*make_inputs())
-    trainer.set_progress_callback(lambda s, t, l: losses.append(l))
-    trainer.process()
-
-    for i in range(1, len(losses)):
-        assert losses[i] < losses[i - 1], (
-            f"La loss devrait décroître : étape {i} = {losses[i]} "
-            f">= étape {i-1} = {losses[i-1]}"
+    trainer = TrainerNode("TestTrainer", output_dir=str(tmp_path))
+    trainer.set_progress_callback(lambda step, total, loss: calls.append((step, total, loss)))
+    trainer.set_input(
+        DataPacket(
+            DataType.ANY,
+            {"mode": "sft", "dataset": "data/test.jsonl", "base_model": "Qwen/Qwen2.5-1.5B"},
         )
+    )
+    trainer.process()
+
+    assert len(calls) == 10
+    assert calls[-1][0] == 100
+    assert calls[-1][1] == 100
+    assert calls[0][2] > calls[-1][2]  # La loss doit diminuer
 
 
-def test_no_callback_does_not_crash():
-    """Sans callback enregistré, process() doit fonctionner normalement."""
-    trainer = make_trainer()
-    trainer.set_inputs(*make_inputs())
-    result = trainer.process()   # Ne doit pas lever d'exception
-    assert result is not None
+def test_sft_cooperative_abort(tmp_path):
+    """request_abort() doit interrompre proprement l'entraînement sans crash."""
+    trainer = TrainerNode("TestTrainer", output_dir=str(tmp_path))
+
+    def abort_on_first_callback(step, total, loss):
+        trainer.request_abort()
+
+    trainer.set_progress_callback(abort_on_first_callback)
+    trainer.set_input(
+        DataPacket(
+            DataType.ANY,
+            {"mode": "sft", "dataset": "data/test.jsonl", "base_model": "Qwen/Qwen2.5-1.5B"},
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="interrompu proprement"):
+        trainer.process()
 
 
 # ---------------------------------------------------------------------------
-# Traçabilité des paquets
+# Tests : Fusion Model Soup (SoupManager + TrainerNode)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(torch is None, reason="PyTorch et safetensors requis pour tester Model Soup")
+def test_model_soup_averages_tensors_correctly(tmp_path):
+    """Vérifie que le mode SOUP calcule exactement la moyenne mathématique des tenseurs."""
+    adapter_a = str(tmp_path / "adapter_a.safetensors")
+    adapter_b = str(tmp_path / "adapter_b.safetensors")
 
-def test_input_packets_have_trace():
-    """Après set_inputs(), les paquets doivent avoir une entrée de trace."""
-    dataset_pkt, model_pkt = make_inputs()
-    trainer = make_trainer()
-    trainer.set_inputs(dataset_pkt, model_pkt)
+    save_file({"lora_w": torch.tensor([2.0, 4.0], dtype=torch.float32)}, adapter_a)
+    save_file({"lora_w": torch.tensor([6.0, 8.0], dtype=torch.float32)}, adapter_b)
 
-    assert len(dataset_pkt._processing_log) >= 1
-    assert len(model_pkt._processing_log) >= 1
-
-
-def test_output_source_is_trainer_name():
-    """Le DataPacket de sortie doit avoir le nom du trainer comme source."""
-    trainer = make_trainer()
-    trainer.set_inputs(*make_inputs())
+    trainer = TrainerNode("SoupTrainer", output_dir=str(tmp_path))
+    config = {
+        "mode": "soup",
+        "soup_name": "juridique_v1",
+        "adapters": [adapter_a, adapter_b],
+    }
+    trainer.set_input(DataPacket(DataType.ANY, config))
     result = trainer.process()
-    assert result.source == "TestTrainer"
+
+    assert result.content.endswith("juridique_v1_soup.safetensors")
+    assert os.path.exists(result.content)
+    assert result.metadata["type"] == "soup_adapter"
+    assert result.metadata["ingredients"] == 2
+
+    merged_weights = load_file(result.content)
+    expected = torch.tensor([4.0, 6.0], dtype=torch.float16)
+    assert torch.allclose(merged_weights["lora_w"], expected)
+
+
+@pytest.mark.skipif(torch is None, reason="PyTorch requis")
+def test_soup_rejects_incompatible_shapes(tmp_path):
+    """SoupManager doit lever une erreur claire si deux adaptateurs n'ont pas les mêmes dimensions."""
+    adapter_a = str(tmp_path / "a.safetensors")
+    adapter_b = str(tmp_path / "b.safetensors")
+    out_soup = str(tmp_path / "out.safetensors")
+
+    save_file({"lora_w": torch.tensor([1.0, 2.0])}, adapter_a)
+    save_file({"lora_w": torch.tensor([1.0, 2.0, 3.0])}, adapter_b)
+
+    with pytest.raises(ValueError, match="Dimensions incompatibles"):
+        SoupManager.make_soup([adapter_a, adapter_b], out_soup)

@@ -100,10 +100,10 @@ FEATURED_MODELS = [
     },
 ]
 
+DEFAULT_MODELS_DIR = os.path.join(_PROJECT_ROOT, "storage", "models", "gguf")
+
 def get_models_dir() -> str:
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(current_dir, ".."))
-    models_dir = os.path.join(project_root, "storage", "models")
+    models_dir = os.path.join(_PROJECT_ROOT, "storage", "models", "gguf")
     os.makedirs(models_dir, exist_ok=True)
     return models_dir
 

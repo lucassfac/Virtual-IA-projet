@@ -1,65 +1,87 @@
 """
 settings_tab.py — Onglet Paramètres.
-Architecture révisée : Import matériel corrigé, encapsulation OOP, délégation des Threads.
+Architecture révisée : Sécurité matérielle, support GGUF/LoRA/Skill et délégation des Threads.
 """
 
 import os
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QSpinBox, QLineEdit, QFrame, QButtonGroup, 
-    QRadioButton, QCheckBox, QMessageBox
+    QButtonGroup,
+    QCheckBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QRadioButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt6.QtCore import pyqtSignal, Qt
+
+from core.session_manager import (
+    clear_hf_token,
+    load_hf_token,
+    save_hf_token,
+    save_last_model,
+    save_vision_model,
+)
+from core.utils.hardware import get_profile
 from gui.widgets import FilePickerRow
-from core.session_manager import save_hf_token, load_hf_token, clear_hf_token
-from core.utils.hardware import get_profile  # <-- CORRECTION DE L'IMPORT MATÉRIEL
-from core.session_manager import save_vision_model, save_last_model
-from gui.workers import ModelLoadWorker      # <-- UTILISATION DU WORKER CENTRALISÉ
+from gui.workers import ModelLoadWorker
 
 
 class SettingsTab(QWidget):
 
-    model_loaded        = pyqtSignal(str, str)
+    model_loaded = pyqtSignal(str, str)
     vision_model_loaded = pyqtSignal(str, str)
 
     def __init__(self, llm_node, vision_node=None, parent=None):
         super().__init__(parent)
-        self.llm_node    = llm_node
+        self.llm_node = llm_node
         self.vision_node = vision_node
-        self._worker     = None
+        self._worker = None
         self._build_ui()
 
     def _check_hardware_limits(self, model_path: str, mmproj_path: str) -> bool:
-        """Vérifie si le modèle sélectionné risque de faire crasher la carte graphique (VRAM)."""
+        """Vérifie si le modèle sélectionné risque de saturer la carte graphique (VRAM)."""
         hw = get_profile()
         vram_dispo = getattr(hw, "gpu_vram_gb", 0)
 
-        # Si pas de GPU détecté, on laisse passer (fallback CPU assuré par llama-cpp)
         if vram_dispo <= 0:
             return True
 
-        taille_modele = os.path.getsize(model_path) / (1024**3) if model_path and os.path.exists(model_path) else 0
-        taille_proj = os.path.getsize(mmproj_path) / (1024**3) if mmproj_path and os.path.exists(mmproj_path) else 0
+        taille_modele = (
+            os.path.getsize(model_path) / (1024**3)
+            if model_path and os.path.exists(model_path)
+            else 0
+        )
+        taille_proj = (
+            os.path.getsize(mmproj_path) / (1024**3)
+            if mmproj_path and os.path.exists(mmproj_path)
+            else 0
+        )
 
-        # Marge pour le KV Cache
-        besoin_estime = taille_modele + taille_proj + 1.5
+        besoin_estime = taille_modele + taille_proj + 1.2
 
         if besoin_estime > vram_dispo:
             msg = QMessageBox(self)
             msg.setIcon(QMessageBox.Icon.Warning)
             msg.setWindowTitle("⚠️ Risque de saturation VRAM")
-            msg.setText("Ce modèle semble trop lourd pour votre carte graphique.")
+            msg.setText("Ce modèle dépasse la VRAM totale de votre carte graphique.")
             msg.setInformativeText(
                 f"• Besoin estimé : ~<b>{besoin_estime:.1f} Go</b> (Modèle + Contexte)<br>"
-                f"• VRAM disponible : <b>{vram_dispo:.1f} Go</b><br><br>"
-                "Si vous continuez, l'application risque de crasher (Out of Memory) "
-                "lors du traitement d'une image.<br><br>"
-                "Forcer le chargement à vos risques et périls ?"
+                f"• VRAM détectée : <b>{vram_dispo:.1f} Go</b><br><br>"
+                "Neural Forge répartira automatiquement le surplus sur votre RAM CPU "
+                "pour éviter un crash, mais l'inférence sera plus lente.<br><br>"
+                "Continuer le chargement ?"
             )
-            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Abort)
-            msg.setDefaultButton(QMessageBox.StandardButton.Abort)
+            msg.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Abort
+            )
+            msg.setDefaultButton(QMessageBox.StandardButton.Yes)
             return msg.exec() == QMessageBox.StandardButton.Yes
-            
+
         return True
 
     def _build_ui(self):
@@ -99,7 +121,9 @@ class SettingsTab(QWidget):
 
         self._show_btn = QPushButton("👁")
         self._show_btn.setFixedSize(42, 42)
-        self._show_btn.setStyleSheet("background:rgba(255,255,255,0.07);border:none;border-radius:10px;color:#8E8E93;")
+        self._show_btn.setStyleSheet(
+            "background:rgba(255,255,255,0.07);border:none;border-radius:10px;color:#8E8E93;"
+        )
         self._show_btn.setCheckable(True)
         self._show_btn.toggled.connect(self._toggle_visibility)
         token_row.addWidget(self._show_btn)
@@ -137,10 +161,11 @@ class SettingsTab(QWidget):
 
         cl.addWidget(self._lbl("Fichier modèle (.gguf)"))
         self.model_picker = FilePickerRow(
-            placeholder="Sélectionnez un modèle GGUF (ex: Gemma, Mistral, Qwen-VL)…",
+            placeholder="Sélectionnez un modèle GGUF (ex: Gemma, Mistral, Qwen-VL, LLaVA)…",
             icon="🧠",
             filters="Modèles GGUF (*.gguf);;Tous (*)",
             dialog_title="Choisir un modèle principal",
+            start_dir="storage/models/gguf",
         )
         cl.addWidget(self.model_picker)
 
@@ -151,16 +176,18 @@ class SettingsTab(QWidget):
             icon="🔮",
             filters="Projecteur mmproj (*.gguf);;Tous (*)",
             dialog_title="Choisir le projecteur principal",
+            start_dir="storage/models/gguf",
         )
         cl.addWidget(self.main_mmproj_picker)
 
         cl.addSpacing(4)
-        cl.addWidget(self._lbl("Équiper une Compétence (.skill — Optionnel)"))
+        cl.addWidget(self._lbl("Équiper un Adaptateur (.safetensors) ou une Compétence (.skill)"))
         self.skill_picker = FilePickerRow(
-            placeholder="Laissez vide pour le comportement par défaut…",
-            icon="📚",
-            filters="Compétences (*.skill);;Tous (*)",
-            dialog_title="Choisir une Compétence",
+            placeholder="Optionnel : Soupe LoRA (.safetensors) ou Compétence RAG (.skill)…",
+            icon="🧩",
+            filters="Adaptateurs & Compétences (*.safetensors *.skill *.bin);;Tous (*)",
+            dialog_title="Choisir un Adaptateur LoRA ou une Compétence",
+            start_dir="storage/models",
         )
         cl.addWidget(self.skill_picker)
         root.addWidget(model_card)
@@ -176,10 +203,11 @@ class SettingsTab(QWidget):
 
         vl.addWidget(self._lbl("Modèle Vision Poids-Plume (.gguf)"))
         self.vision_model_picker = FilePickerRow(
-            placeholder="Ex: moondream2-q8_0.gguf",
+            placeholder="Ex: moondream2-q8_0.gguf ou llava.gguf",
             icon="👁",
             filters="Modèles GGUF (*.gguf);;Tous (*)",
             dialog_title="Choisir le modèle Expert Vision",
+            start_dir="storage/models/gguf",
         )
         vl.addWidget(self.vision_model_picker)
 
@@ -190,12 +218,17 @@ class SettingsTab(QWidget):
             icon="🔮",
             filters="Projecteur mmproj (*.gguf);;Tous (*)",
             dialog_title="Choisir le projecteur Expert Vision",
+            start_dir="storage/models/gguf",
         )
         vl.addWidget(self.vision_mmproj_picker)
 
         vl.addSpacing(10)
-        self.checkbox_force_orch = QCheckBox(" Forcer l'Orchestration Composite (OCR + VLM + LLM)")
-        self.checkbox_force_orch.setStyleSheet("color:#F2F2F7; font-size:12px; background:transparent;")
+        self.checkbox_force_orch = QCheckBox(
+            " Forcer l'Orchestration Composite (OCR + VLM + LLM)"
+        )
+        self.checkbox_force_orch.setStyleSheet(
+            "color:#F2F2F7; font-size:12px; background:transparent;"
+        )
         vl.addWidget(self.checkbox_force_orch)
 
         root.addWidget(vision_card)
@@ -216,20 +249,31 @@ class SettingsTab(QWidget):
         self._mode_group = QButtonGroup(self)
         self._radio_standard = QRadioButton("  Standard")
         self._radio_standard.setChecked(True)
-        self._radio_standard.setStyleSheet("QRadioButton{color:#F2F2F7;font-size:13px;background:transparent;}")
+        self._radio_standard.setStyleSheet(
+            "QRadioButton{color:#F2F2F7;font-size:13px;background:transparent;}"
+        )
         self._mode_group.addButton(self._radio_standard, 0)
         mode_row.addWidget(self._radio_standard)
 
         self._radio_turbo = QRadioButton("  Turbo  ⚡")
         self._radio_turbo.setEnabled(hw.turbo_eligible)
-        self._radio_turbo.setStyleSheet(f"QRadioButton{{color:{'#F2F2F7' if hw.turbo_eligible else '#3A3A3C'};font-size:13px;background:transparent;}}")
+        self._radio_turbo.setStyleSheet(
+            f"QRadioButton{{color:{'#F2F2F7' if hw.turbo_eligible else '#3A3A3C'};"
+            "font-size:13px;background:transparent;}"
+        )
         self._mode_group.addButton(self._radio_turbo, 1)
         mode_row.addWidget(self._radio_turbo)
         mode_row.addStretch()
         ml.addLayout(mode_row)
 
-        hw_info = QLabel(f"RAM : {hw.ram_total_gb} Go  ·  GPU : {hw.gpu_name} ({hw.gpu_vram_gb} Go)  ·  CPU : {hw.cpu_cores_phys} cœurs")
-        hw_info.setStyleSheet(f"color:{'#30D158' if hw.turbo_eligible else '#FF9F0A'};font-size:11px;background:transparent;")
+        hw_info = QLabel(
+            f"RAM : {hw.ram_total_gb} Go  ·  GPU : {hw.gpu_name} ({hw.gpu_vram_gb} Go)  ·  "
+            f"CPU : {hw.cpu_cores_phys} cœurs"
+        )
+        hw_info.setStyleSheet(
+            f"color:{'#30D158' if hw.turbo_eligible else '#FF9F0A'};"
+            "font-size:11px;background:transparent;"
+        )
         ml.addWidget(hw_info)
 
         if hw.turbo_eligible:
@@ -238,6 +282,7 @@ class SettingsTab(QWidget):
                 placeholder="Ex : tinyllama.gguf...",
                 icon="⚡",
                 filters="Modèles GGUF (*.gguf);;Tous (*)",
+                start_dir="storage/models/gguf",
             )
             ml.addWidget(self.draft_picker)
         else:
@@ -304,13 +349,13 @@ class SettingsTab(QWidget):
         st_card = self._card()
         sl = QVBoxLayout(st_card)
         sl.setContentsMargins(20, 16, 20, 16)
-        
+
         dot_row = QHBoxLayout()
         self._dot = QLabel()
         self._dot.setFixedSize(10, 10)
         self._dot_color("#3A3A3C")
         dot_row.addWidget(self._dot)
-        
+
         self._st_text = QLabel("Aucun modèle chargé")
         self._st_text.setObjectName("pageSubtitle")
         dot_row.addWidget(self._st_text)
@@ -330,8 +375,8 @@ class SettingsTab(QWidget):
 
     def _on_load_architecture_clicked(self):
         vision_model = self.vision_model_picker.get_path()
-        vision_proj  = self.vision_mmproj_picker.get_path()
-        
+        vision_proj = self.vision_mmproj_picker.get_path()
+
         if vision_model and vision_proj:
             save_vision_model(vision_model, vision_proj)
             self.vision_model_loaded.emit(vision_model, vision_proj)
@@ -340,21 +385,26 @@ class SettingsTab(QWidget):
             self.vision_model_loaded.emit("", "")
 
         main_model = self.model_picker.get_path()
-        main_proj  = self.main_mmproj_picker.get_path()
+        main_proj = self.main_mmproj_picker.get_path()
         skill_path = self.skill_picker.get_path()
         draft_path = self.draft_picker.get_path() if self.draft_picker else None
-        turbo      = self._radio_turbo.isChecked()
+        turbo = self._radio_turbo.isChecked()
 
         if not main_model:
             self._dot_color("#FF453A")
             self._st_text.setText("Sélectionnez au moins un Fichier Modèle Principal.")
             return
 
-        # Appel interne au Garde-Fou matériel
         if not self._check_hardware_limits(main_model, main_proj):
             self._dot_color("#FF9F0A")
             self._st_text.setText("Chargement annulé par sécurité matérielle.")
             return
+
+        self.llm_node.max_tokens_limit = self.max_tok_spin.value()
+        self.llm_node.context_window = self.ctx_spin.value()
+        self.llm_node.force_orchestration = self.checkbox_force_orch.isChecked()
+        if self.vision_node:
+            self.vision_node.max_tokens_limit = self.max_tok_spin.value()
 
         self.btn_load_architecture.setEnabled(False)
         self.btn_load_architecture.setText("🚀 Chargement en cours...")
@@ -362,21 +412,24 @@ class SettingsTab(QWidget):
         self._st_text.setText("Démarrage des moteurs IA...")
         self._st_detail.hide()
 
-        # Démarrage du thread centralisé
-        self._worker = ModelLoadWorker(self.llm_node, main_model, main_proj, skill_path, draft_path, turbo)
+        self._worker = ModelLoadWorker(
+            self.llm_node, main_model, main_proj, skill_path, draft_path, turbo
+        )
         self._worker.success.connect(self._on_load_success)
         self._worker.error.connect(self._on_load_error)
-        self._worker.finished.connect(lambda: (
-            self.btn_load_architecture.setEnabled(True),
-            self.btn_load_architecture.setText("🚀 CHARGER L'ARCHITECTURE"),
-        ))
+        self._worker.finished.connect(
+            lambda: (
+                self.btn_load_architecture.setEnabled(True),
+                self.btn_load_architecture.setText("🚀 CHARGER L'ARCHITECTURE"),
+            )
+        )
         self._worker.start()
 
-    def _on_load_success(self, model_path):
+    def _on_load_success(self, model_path: str):
         skill = self.skill_picker.get_path()
         name = os.path.basename(model_path)
-        skill_info = f"Skill : {os.path.basename(skill)}" if skill else "Aucun Skill actif"
-        
+        skill_info = f"Module : {os.path.basename(skill)}" if skill else "Aucun module additionnel"
+
         self._dot_color("#30D158")
         self._st_text.setText(f"Moteur Actif : {name}")
         self._st_detail.setText(
@@ -387,7 +440,7 @@ class SettingsTab(QWidget):
         self._st_detail.show()
         self.model_loaded.emit(model_path, skill or "")
 
-    def _on_load_error(self, msg):
+    def _on_load_error(self, msg: str):
         self._dot_color("#FF453A")
         self._st_text.setText("Échec du chargement")
         self._st_detail.setText(msg)
@@ -395,14 +448,16 @@ class SettingsTab(QWidget):
 
     def _unload(self):
         self.llm_node.unload_model()
-        save_last_model("", "")
+        save_last_model("", "", "")
         self._dot_color("#FF453A")
         self._st_text.setText("Système hors ligne")
         self._st_detail.hide()
         self.model_loaded.emit("", "")
 
     def _toggle_visibility(self, checked: bool):
-        self._token_input.setEchoMode(QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
+        self._token_input.setEchoMode(
+            QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+        )
 
     def _save_token(self):
         token = self._token_input.text().strip()
@@ -436,4 +491,7 @@ class SettingsTab(QWidget):
         return widget
 
     def _dot_color(self, color: str):
-        self._dot.setStyleSheet(f"background-color:{color}; border-radius:5px; min-width:10px; max-width:10px; min-height:10px; max-height:10px;")
+        self._dot.setStyleSheet(
+            f"background-color:{color}; border-radius:5px; "
+            "min-width:10px; max-width:10px; min-height:10px; max-height:10px;"
+        )

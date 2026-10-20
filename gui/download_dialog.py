@@ -4,37 +4,51 @@ Utilise les Threads de gui.workers pour éviter de figer l'interface.
 """
 
 import os
+import time
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QListWidget, QListWidgetItem,
-    QProgressBar, QFrame,
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QProgressBar,
+    QPushButton,
+    QVBoxLayout,
 )
-from PyQt6.QtCore import Qt, pyqtSlot, QTimer, QThread, pyqtSignal
-from core.model_manager import get_repo_gguf_files, load_hf_token, get_models_dir
+
+from core.model_manager import get_models_dir, get_repo_gguf_files, load_hf_token
 from gui.workers import DownloadWorker
 
+
 # ── Worker de chargement de liste ─────────────────────────────────────
+
 class FileListWorker(QThread):
     done = pyqtSignal(list)
     error = pyqtSignal(str)
-    
-    def __init__(self, repo_id):
-        super().__init__()
+
+    def __init__(self, repo_id: str, parent=None):
+        super().__init__(parent)
         self.repo_id = repo_id
-        
+
     def run(self):
         try:
             self.done.emit(get_repo_gguf_files(self.repo_id))
         except Exception as e:
             self.error.emit(str(e))
 
+
 # ── Dialog sélection du fichier GGUF ─────────────────────────────────
 
 class FileSelectorDialog(QDialog):
+
     def __init__(self, repo_id: str, parent=None):
         super().__init__(parent)
         self.repo_id = repo_id
         self.selected_file = None
+        self._loader = None
         self.setWindowTitle(f"Choisir un fichier — {repo_id.split('/')[-1]}")
         self.setFixedWidth(560)
         self.setStyleSheet(
@@ -49,7 +63,7 @@ class FileSelectorDialog(QDialog):
         root.setContentsMargins(24, 24, 24, 20)
         root.setSpacing(14)
 
-        title = QLabel(f"Fichiers disponibles")
+        title = QLabel("Fichiers disponibles")
         title.setStyleSheet("font-size:16px;font-weight:600;color:#F2F2F7;")
         root.addWidget(title)
 
@@ -98,7 +112,7 @@ class FileSelectorDialog(QDialog):
         root.addLayout(btns)
 
     def _load_files(self):
-        self._loader = FileListWorker(self.repo_id)
+        self._loader = FileListWorker(self.repo_id, parent=self)
         self._loader.done.connect(self._on_files)
         self._loader.error.connect(self._on_error)
         self._loader.start()
@@ -115,16 +129,16 @@ class FileSelectorDialog(QDialog):
         for f in files:
             item = QListWidgetItem()
             name = f["filename"]
-            size = f"  {f['size_gb']} Go" if f.get("size_gb") else ""
-            badge = "  ★ Recommandé" if "Q4_K_M" in name else ""
+            size = f"  ({f['size_gb']} Go)" if f.get("size_gb") else ""
+            badge = "  ★ Recommandé" if "Q4_K_M" in name.upper() else ""
             item.setText(f"{name}{size}{badge}")
             item.setData(Qt.ItemDataRole.UserRole, f)
-            if "Q4_K_M" in name:
-                item.setForeground(__import__('PyQt6.QtGui', fromlist=['QColor']).QColor("#F2F2F7"))
+            if "Q4_K_M" in name.upper():
+                item.setForeground(QColor("#F2F2F7"))
             self._list.addItem(item)
 
         for i in range(self._list.count()):
-            if "Q4_K_M" in self._list.item(i).text():
+            if "Q4_K_M" in self._list.item(i).text().upper():
                 self._list.setCurrentRow(i)
                 break
         else:
@@ -134,14 +148,16 @@ class FileSelectorDialog(QDialog):
         self._ok_btn.setEnabled(True)
         self._on_select(self._list.currentItem(), None)
 
-    def _on_select(self, current, previous):
-        if not current: return
+    def _on_select(self, current, _previous):
+        if not current:
+            return
         f = current.data(Qt.ItemDataRole.UserRole)
-        if f:
-            self._size_lbl.setText(
-                f"Taille : {f.get('size_gb', '?')} Go  "
-                f"({f.get('size_mb', '?'):.0f} Mo)" if f.get("size_mb") else ""
-            )
+        if f and f.get("size_gb"):
+            size_gb = f["size_gb"]
+            size_mb = size_gb * 1024
+            self._size_lbl.setText(f"Taille : {size_gb:.2f} Go  (~{size_mb:.0f} Mo)")
+        else:
+            self._size_lbl.setText("")
 
     @pyqtSlot(str)
     def _on_error(self, msg: str):
@@ -154,24 +170,41 @@ class FileSelectorDialog(QDialog):
             self.selected_file = item.data(Qt.ItemDataRole.UserRole)
             self.accept()
 
+    def reject(self):
+        if self._loader and self._loader.isRunning():
+            try:
+                self._loader.done.disconnect()
+                self._loader.error.disconnect()
+            except Exception:
+                pass
+            self._loader.wait(200)
+        super().reject()
+
+
 # ── Fenêtre de progression style Steam ───────────────────────────────
 
 class DownloadProgressDialog(QDialog):
-    def __init__(self, repo_id: str, file_info: dict, dest_dir: str, parent=None):
+
+    def __init__(self, repo_id: str, file_info: dict, dest_dir: str = "", parent=None):
         super().__init__(parent)
         self.repo_id = repo_id
         self.file_info = file_info
-        self.dest_dir = dest_dir
+        self.dest_dir = dest_dir or get_models_dir()
         self._worker = None
         self._start_time = None
         self._last_bytes = 0
-        self._last_time = 0
+        self._last_time = 0.0
+        self._max_total = 0
         self._speed_samples = []
         self.result_path = ""
 
         self.setWindowTitle("Téléchargement")
         self.setFixedWidth(520)
-        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowTitleHint | Qt.WindowType.CustomizeWindowHint)
+        self.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.CustomizeWindowHint
+        )
         self.setStyleSheet("QDialog{background:#1C1C1E;}")
         self._build()
         self._start()
@@ -182,7 +215,9 @@ class DownloadProgressDialog(QDialog):
         root.setSpacing(14)
 
         title = QLabel(self.file_info.get("filename", ""))
-        title.setStyleSheet("font-size:14px;font-weight:600;color:#F2F2F7;background:transparent;")
+        title.setStyleSheet(
+            "font-size:14px;font-weight:600;color:#F2F2F7;background:transparent;"
+        )
         title.setWordWrap(True)
         root.addWidget(title)
 
@@ -198,7 +233,8 @@ class DownloadProgressDialog(QDialog):
         self._bar.setTextVisible(False)
         self._bar.setStyleSheet(
             "QProgressBar{background:rgba(255,255,255,0.08);border:none;border-radius:5px;}"
-            "QProgressBar::chunk{background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #1A6FFF, stop:0.5 #0A84FF, stop:1 #30D158);border-radius:5px;}"
+            "QProgressBar::chunk{background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #1A6FFF, stop:0.5 #0A84FF, stop:1 #30D158);border-radius:5px;}"
         )
         root.addWidget(self._bar)
 
@@ -206,7 +242,9 @@ class DownloadProgressDialog(QDialog):
         stats.setSpacing(0)
 
         self._pct_lbl = QLabel("0%")
-        self._pct_lbl.setStyleSheet("font-size:22px;font-weight:700;color:#F2F2F7;background:transparent;")
+        self._pct_lbl.setStyleSheet(
+            "font-size:22px;font-weight:700;color:#F2F2F7;background:transparent;"
+        )
         stats.addWidget(self._pct_lbl)
         stats.addStretch()
 
@@ -215,7 +253,9 @@ class DownloadProgressDialog(QDialog):
         right_stats.setAlignment(Qt.AlignmentFlag.AlignRight)
 
         self._speed_lbl = QLabel("— Mo/s")
-        self._speed_lbl.setStyleSheet("font-size:13px;color:#0A84FF;font-weight:500;background:transparent;")
+        self._speed_lbl.setStyleSheet(
+            "font-size:13px;color:#0A84FF;font-weight:500;background:transparent;"
+        )
         self._speed_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         right_stats.addWidget(self._speed_lbl)
 
@@ -252,39 +292,45 @@ class DownloadProgressDialog(QDialog):
         self._cancel_btn.setObjectName("dangerBtn")
         self._cancel_btn.setFixedHeight(36)
         self._cancel_btn.setFixedWidth(100)
-        self._cancel_btn.setStyleSheet("QPushButton#dangerBtn{font-size:12px;min-height:36px;border-radius:9px;}")
+        self._cancel_btn.setStyleSheet(
+            "QPushButton#dangerBtn{font-size:12px;min-height:36px;border-radius:9px;}"
+        )
         self._cancel_btn.clicked.connect(self._cancel)
         btns.addWidget(self._cancel_btn)
         root.addLayout(btns)
 
     def _start(self):
-        import time
         self._start_time = time.time()
         self._last_time = self._start_time
         self._max_total = 0
 
-        self._worker = DownloadWorker(self.repo_id, self.file_info["filename"], self.dest_dir, token=load_hf_token())
+        self._worker = DownloadWorker(
+            self.repo_id,
+            self.file_info["filename"],
+            self.dest_dir,
+            token=load_hf_token(),
+        )
         self._worker.progress.connect(self._on_progress)
         self._worker.success.connect(self._on_success)
         self._worker.error.connect(self._on_error)
         self._worker.start()
 
-    @pyqtSlot(int, int)
+    @pyqtSlot(object, object)
     def _on_progress(self, done: int, total: int):
-        import time
         now = time.time()
 
-        if not hasattr(self, "_max_total"): self._max_total = total
-        if total > self._max_total: self._max_total = total
+        if total > self._max_total:
+            self._max_total = total
         real_total = max(self._max_total, done)
 
-        if real_total <= 0: return
+        if real_total <= 0:
+            return
 
         pct = min(done / real_total, 1.0)
         self._bar.setValue(int(pct * 1000))
         self._detail_bar.setRange(0, 1000)
         self._detail_bar.setValue(int(pct * 1000))
-        self._pct_lbl.setText(f"{pct*100:.1f}%")
+        self._pct_lbl.setText(f"{pct * 100:.1f}%")
         self._size_lbl.setText(f"{done / 1024**2:.1f} Mo  /  {real_total / 1024**2:.1f} Mo")
 
         elapsed = now - self._last_time
@@ -293,16 +339,20 @@ class DownloadProgressDialog(QDialog):
             if delta_bytes > 0:
                 speed = delta_bytes / elapsed
                 self._speed_samples.append(speed)
-                if len(self._speed_samples) > 6: self._speed_samples.pop(0)
+                if len(self._speed_samples) > 6:
+                    self._speed_samples.pop(0)
                 avg_speed = sum(self._speed_samples) / len(self._speed_samples)
-                self._speed_lbl.setText(f"{avg_speed/1024**2:.1f} Mo/s")
+                self._speed_lbl.setText(f"{avg_speed / 1024**2:.1f} Mo/s")
 
                 remaining = real_total - done
                 if avg_speed > 0 and remaining > 0:
                     eta_s = remaining / avg_speed
-                    if eta_s < 60: self._eta_lbl.setText(f"{eta_s:.0f}s restantes")
-                    elif eta_s < 3600: self._eta_lbl.setText(f"{eta_s/60:.0f} min restantes")
-                    else: self._eta_lbl.setText(f"{eta_s/3600:.1f}h restantes")
+                    if eta_s < 60:
+                        self._eta_lbl.setText(f"{eta_s:.0f}s restantes")
+                    elif eta_s < 3600:
+                        self._eta_lbl.setText(f"{eta_s / 60:.0f} min restantes")
+                    else:
+                        self._eta_lbl.setText(f"{eta_s / 3600:.1f}h restantes")
 
             self._last_bytes = done
             self._last_time = now
@@ -313,12 +363,16 @@ class DownloadProgressDialog(QDialog):
         self._bar.setValue(1000)
         self._pct_lbl.setText("100%")
         self._speed_lbl.setText("Installé ✓")
-        self._speed_lbl.setStyleSheet("font-size:13px;color:#30D158;font-weight:500;background:transparent;")
+        self._speed_lbl.setStyleSheet(
+            "font-size:13px;color:#30D158;font-weight:500;background:transparent;"
+        )
         self._eta_lbl.setText(os.path.basename(path))
         self._size_lbl.setText("Téléchargement terminé")
 
-        try: self._cancel_btn.clicked.disconnect()
-        except Exception: pass
+        try:
+            self._cancel_btn.clicked.disconnect()
+        except Exception:
+            pass
         self._cancel_btn.setText("Fermer")
         self._cancel_btn.setStyleSheet(
             "background:rgba(255,255,255,0.08);color:#EBEBF5;"
@@ -331,20 +385,37 @@ class DownloadProgressDialog(QDialog):
     @pyqtSlot(str)
     def _on_error(self, msg: str):
         self._pct_lbl.setText("Erreur")
-        self._pct_lbl.setStyleSheet("font-size:22px;font-weight:700;color:#FF453A;background:transparent;")
+        self._pct_lbl.setStyleSheet(
+            "font-size:22px;font-weight:700;color:#FF453A;background:transparent;"
+        )
         self._speed_lbl.setText("")
         self._eta_lbl.setText(msg[:80])
-        self._eta_lbl.setStyleSheet("font-size:11px;color:#FF453A;background:transparent;")
+        self._eta_lbl.setStyleSheet(
+            "font-size:11px;color:#FF453A;background:transparent;"
+        )
         self._cancel_btn.setText("Fermer")
-        self._cancel_btn.clicked.disconnect()
+        try:
+            self._cancel_btn.clicked.disconnect()
+        except Exception:
+            pass
         self._cancel_btn.clicked.connect(self.reject)
         self._detail_bar.setRange(0, 1)
         self._detail_bar.setValue(0)
 
     def _cancel(self):
-        if self._worker and self._worker.isRunning(): self._worker.cancel()
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            try:
+                self._worker.progress.disconnect()
+                self._worker.success.disconnect()
+                self._worker.error.disconnect()
+            except Exception:
+                pass
+            self._worker.wait(500)
         self.reject()
 
     def closeEvent(self, event):
-        self._cancel()
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            self._worker.wait(500)
         super().closeEvent(event)
