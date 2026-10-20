@@ -1,24 +1,11 @@
 """
 test_vision_node.py — Tests unitaires pour VisionNode (multimodal).
-
-Stratégie : MockVisionNode remplace le moteur LLaVA réel par un MagicMock
-pour que les tests s'exécutent sans modèle téléchargé.
-
-Couvre :
-  - Rejet des types non-image lors de _run_inference
-  - Image manquante (FileNotFoundError)
-  - set_prompt()
-  - Contenu et métadonnées de la réponse
-  - Chargement avec fichier mmproj manquant
-  - get_status() après chargement
 """
 
 import os
 import sys
-import tempfile
-
-import pytest
 from unittest.mock import MagicMock
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -27,13 +14,8 @@ from core.nodes.vision_node import VisionNode
 from core.types import DataPacket, DataType
 
 
-# ---------------------------------------------------------------------------
-# Mock : VisionNode sans vrai LLaVA
-# ---------------------------------------------------------------------------
-
-
 class MockVisionNode(VisionNode):
-    """VisionNode avec moteur LLaVA simulé."""
+    """VisionNode avec moteur VLM simulé pour exécution rapide hors-ligne."""
 
     def load_model(self, model_path: str, mmproj_path: str) -> None:  # type: ignore
         self.current_model_path = model_path
@@ -41,19 +23,10 @@ class MockVisionNode(VisionNode):
         self.llm_engine = MagicMock()
         self.llm_engine.create_chat_completion.return_value = {
             "choices": [
-                {
-                    "message": {
-                        "content": "Un chat orange allongé sur un canapé en velours."
-                    }
-                }
+                {"message": {"content": "Un chat orange allongé sur un canapé en velours."}}
             ]
         }
         self.model_loaded = True
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -65,9 +38,8 @@ def node():
 
 @pytest.fixture
 def temp_image(tmp_path):
-    """Crée un fichier PNG factice pour les tests nécessitant un vrai fichier."""
+    """Crée un fichier PNG valide (1×1 pixel) pour les tests d'encodage Base64."""
     img = tmp_path / "test.png"
-    # PNG minimal (1×1 pixel blanc)
     img.write_bytes(
         b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
         b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"
@@ -78,105 +50,57 @@ def temp_image(tmp_path):
     return str(img)
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
-def test_vision_inference_rejects_text_packet(node):
-    """_run_inference() doit lever InvalidDataTypeError si le paquet est TEXT."""
-    node.input_packet = DataPacket(DataType.TEXT, "pas une image")
+def test_vision_set_input_rejects_non_image(node):
+    """set_input() doit lever InvalidDataTypeError pour TEXT et AUDIO_PATH."""
     with pytest.raises(InvalidDataTypeError):
-        node._run_inference()
-
-
-def test_vision_inference_rejects_missing_image(node):
-    """_run_inference() doit lever FileNotFoundError si l'image est absente."""
-    node.input_packet = DataPacket(
-        DataType.IMAGE_PATH, "/tmp/image_inexistante_12345.jpg"
-    )
-    with pytest.raises(FileNotFoundError):
-        node._run_inference()
-
-
-def test_vision_inference_rejects_text_packet(node):
-    """set_input() doit lever InvalidDataTypeError si le paquet est TEXT."""
-    from core.node import InvalidDataTypeError
-    with pytest.raises(InvalidDataTypeError):
-        # Utilisation de la méthode officielle qui effectue la vérification
         node.set_input(DataPacket(DataType.TEXT, "pas une image"))
-
-
-def test_vision_inference_metadata(node, temp_image):
-    """Le DataPacket de sortie doit contenir image_path et temp_used dans ses métadonnées."""
-    node.set_prompt("Décris les couleurs dominantes.")
-    node.set_input(DataPacket(DataType.IMAGE_PATH, temp_image))
-    result = node._run_inference()
-
-    assert result.metadata["image_path"] == temp_image
-    assert "temp_used" in result.metadata
-    assert result.metadata["model"] == "/tmp/llava.gguf"
-
-
-def test_set_prompt_updates_question(node):
-    """set_prompt() doit mettre à jour text_prompt."""
-    node.set_prompt("Quelle est la couleur dominante ?")
-    assert node.text_prompt == "Quelle est la couleur dominante ?"
-
-
-def test_default_prompt_is_set():
-    """Le prompt par défaut doit être une description générale."""
-    node = MockVisionNode("V")
-    node.load_model("/tmp/m.gguf", "/tmp/p.gguf")
-    assert "Décris" in node.text_prompt
-
-
-def test_load_model_missing_mmproj_raises(tmp_path):
-    """load_model() sur VisionNode réel doit échouer si mmproj absent.
-    On crée un vrai fichier modèle factice pour passer la première vérification
-    et atteindre le check du mmproj manquant.
-    """
-    fake_model = tmp_path / "fake_model.gguf"
-    fake_model.write_text("fake")   # Le fichier existe, le mmproj non
-
-    node = VisionNode("VReal")
-    with pytest.raises(ModelLoadError, match="mmproj"):
-        node.load_model(str(fake_model), "/tmp/missing_mmproj_xyz.gguf")
-
-
-def test_load_model_missing_model_raises():
-    """load_model() sur VisionNode réel doit échouer si modèle absent."""
-    node = VisionNode("VReal")
-    with pytest.raises(ModelLoadError):
-        node.load_model("/tmp/missing_model_xyz.gguf", "/tmp/fake_mmproj.gguf")
-
-
-def test_get_status_after_load(node):
-    """get_status() doit indiquer model_loaded=True après chargement."""
-    status = node.get_status()
-    assert status["model_loaded"] is True
-    assert "image_path" in status["accepted_types"]
-
-
-def test_accepted_types_only_image():
-    """VisionNode ne doit accepter que IMAGE_PATH en entrée."""
-    node = MockVisionNode("V")
-    node.load_model("/tmp/m.gguf", "/tmp/p.gguf")
-
-    from core.node import InvalidDataTypeError
-
-    with pytest.raises(InvalidDataTypeError):
-        node.set_input(DataPacket(DataType.TEXT, "un texte"))
-
     with pytest.raises(InvalidDataTypeError):
         node.set_input(DataPacket(DataType.AUDIO_PATH, "/audio.wav"))
 
 
-def test_full_pipeline_via_process(node, temp_image):
-    """process() complet via set_input + process() doit fonctionner."""
-    packet = DataPacket(DataType.IMAGE_PATH, temp_image)
-    node.set_input(packet)
+def test_vision_inference_rejects_missing_image(node):
+    """_run_inference() doit lever FileNotFoundError si le fichier image n'existe pas."""
+    node.input_packet = DataPacket(DataType.IMAGE_PATH, "/tmp/image_inexistante_12345.jpg")
+    with pytest.raises(FileNotFoundError):
+        node._run_inference()
+
+
+def test_vision_inference_metadata_and_analytical_tuning(node, temp_image):
+    """Vérifie les métadonnées et l'abaissement de température (0.1) sur un prompt analytique."""
+    node.set_prompt("Analyse ce MCD et lis le code SQL.")
+    node.set_input(DataPacket(DataType.IMAGE_PATH, temp_image))
     result = node.process()
 
-    assert result is not None
-    assert result.data_type == DataType.TEXT
+    assert result.metadata["image_path"] == temp_image
+    assert result.metadata["temp_used"] == 0.1
+    assert result.metadata["model"] == "/tmp/llava.gguf"
+
+
+def test_set_prompt_and_default_prompt(node):
+    """Vérifie le prompt par défaut et sa modification via set_prompt()."""
+    fresh_node = MockVisionNode("V")
+    assert "Décris" in fresh_node.text_prompt
+
+    node.set_prompt("Quelle est la couleur dominante ?")
+    assert node.text_prompt == "Quelle est la couleur dominante ?"
+
+
+def test_load_model_missing_files_raise(tmp_path):
+    """load_model() sur VisionNode réel doit lever ModelLoadError si modèle ou mmproj est absent."""
+    real_node = VisionNode("VReal")
+    with pytest.raises(ModelLoadError):
+        real_node.load_model("/tmp/missing_model_xyz.gguf", "/tmp/fake_mmproj.gguf")
+
+    fake_model = tmp_path / "fake_model.gguf"
+    fake_model.write_text("fake")
+    with pytest.raises(ModelLoadError, match="mmproj"):
+        real_node.load_model(str(fake_model), "/tmp/missing_mmproj_xyz.gguf")
+
+
+def test_unload_model_clears_vram_state(node):
+    """unload_model() doit fermer le moteur et remettre model_loaded à False."""
+    assert node.model_loaded is True
+    node.unload_model()
+    assert node.model_loaded is False
+    assert node.llm_engine is None
+    assert node.current_model_path is None

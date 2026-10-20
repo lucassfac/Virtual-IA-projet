@@ -1,40 +1,32 @@
-# Moteur IA local
-llama-cpp-python>=0.2.0
+# ── 1. Moteur d'Inférence Local (GGUF & Multimodal) ──────────────────
+llama-cpp-python>=0.3.18
+diskcache>=5.6.3
+numpy>=2.0.0
 
-# Interface graphique
-PyQt6>=6.4.0
+# ── 2. Entraînement (SFT LoRA) & Fusion (Model Soup) ─────────────────
+torch>=2.4.0
+safetensors>=0.4.5
+transformers>=4.46.0
+peft>=0.13.0
+trl>=0.12.0
+datasets>=3.0.0
+accelerate>=1.0.0
+huggingface-hub>=0.26.0
 
-# Tests
-pytest>=7.4.0
-pytest-qt>=4.2.0
+# ── 3. Mémoire Vectorielle (RAG Épisodique) ──────────────────────────
+chromadb>=0.5.0
+sentence-transformers>=3.2.0
 
-# Optionnel : support GPU CUDA (décommenter si GPU disponible)
-# llama-cpp-python[cuda]>=0.2.0
+# ── 4. Lecture Documentaire & Vision (PDF, Word, OCR) ────────────────
+PyMuPDF>=1.24.0
+python-docx>=1.1.2
+Pillow>=10.4.0
+pytesseract>=0.3.13
 
-bottle==0.13.4
-bottle-websocket==0.2.9
-diskcache==5.6.3
-Eel==0.18.2
-future==1.0.0
-gevent==26.4.0
-gevent-websocket==0.10.1
-greenlet==3.4.0
-importlib_resources==7.1.0
-Jinja2==3.1.6
-llama_cpp_python==0.3.18
-lxml==6.1.1
-MarkupSafe==3.0.3
-numpy==2.2.6
-packaging==26.3
-pillow==12.2.0
-psutil==7.2.2
-pymupdf==1.28.2
-pyparsing==3.3.2
-PyQt6==6.11.0
-PyQt6-Qt6==6.11.0
-PyQt6_sip==13.11.1
-pytesseract==0.3.13
-python-docx==1.2.0
-typing_extensions==4.15.0
-zope.event==6.1
-zope.interface==8.4
+# ── 5. Interface Graphique & Télémétrie Matérielle ───────────────────
+PyQt6>=6.7.0
+psutil>=6.0.0
+
+# ── 6. Qualité Logicielle & Tests Unitaires ──────────────────────────
+pytest>=8.0.0
+pytest-qt>=4.4.0
